@@ -13,6 +13,9 @@ import {
   setDoc,
   updateDoc,
 } from "firebase/firestore";
+import CalculatorDisguise from "@/components/CalculatorDisguise";
+import DoodleModal from "@/components/DoodleModal";
+import FunModal from "@/components/FunModal";
 
 const USER_1 = "Joy";
 const USER_2 = "Meher";
@@ -22,11 +25,16 @@ const DEFAULT_PINS = {
   [USER_2]: "2222",
 };
 
+const THEMES = {
+  rose: { bubble: "bg-rose-600", btn: "bg-rose-600", accent: "text-rose-400", dot: "bg-rose-500" },
+  blue: { bubble: "bg-sky-600", btn: "bg-sky-600", accent: "text-sky-400", dot: "bg-sky-500" },
+  violet: { bubble: "bg-violet-600", btn: "bg-violet-600", accent: "text-violet-400", dot: "bg-violet-500" },
+  emerald: { bubble: "bg-emerald-600", btn: "bg-emerald-600", accent: "text-emerald-400", dot: "bg-emerald-500" },
+};
+
 function formatLastSeen(presence, now) {
   if (!presence) return "Offline";
-  const isOnline = presence.online && now - presence.lastSeen < 45000;
-  if (isOnline) return "Online";
-
+  if (presence.online && now - presence.lastSeen < 45000) return "Online";
   if (!presence.lastSeen) return "Offline";
   const diffSec = Math.floor((now - presence.lastSeen) / 1000);
   if (diffSec < 60) return "Last seen just now";
@@ -34,11 +42,17 @@ function formatLastSeen(presence, now) {
   if (mins < 60) return `Last seen ${mins}m ago`;
   const hrs = Math.floor(mins / 60);
   if (hrs < 24) return `Last seen ${hrs}h ago`;
-  const days = Math.floor(hrs / 24);
-  return `Last seen ${days}d ago`;
+  return `Last seen ${Math.floor(hrs / 24)}d ago`;
 }
 
-// কোনো অডিও ফাইল ছাড়াই মিষ্টি নোটিফিকেশন সাউন্ড তৈরি করা
+function getYouTubeId(text) {
+  if (!text) return null;
+  const match = text.match(
+    /(?:youtube\.com\/(?:watch\?v=|shorts\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/
+  );
+  return match ? match[1] : null;
+}
+
 function playNotificationSound() {
   try {
     const AudioCtx = window.AudioContext || window.webkitAudioContext;
@@ -46,27 +60,22 @@ function playNotificationSound() {
     const ctx = new AudioCtx();
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
-
     osc.type = "sine";
-    osc.frequency.setValueAtTime(587.33, ctx.currentTime); // D5
-    osc.frequency.setValueAtTime(880, ctx.currentTime + 0.08); // A5
-
+    osc.frequency.setValueAtTime(587.33, ctx.currentTime);
+    osc.frequency.setValueAtTime(880, ctx.currentTime + 0.08);
     gain.gain.setValueAtTime(0.12, ctx.currentTime);
     gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.25);
-
     osc.connect(gain);
     gain.connect(ctx.destination);
-
     osc.start();
     osc.stop(ctx.currentTime + 0.25);
-  } catch {
-    // ব্রাউজার অডিও ব্লক করলে এরর এড়িয়ে যাবে
-  }
+  } catch {}
 }
 
 export default function CoupleChat() {
   const [pins, setPins] = useState(DEFAULT_PINS);
   const [currentUser, setCurrentUser] = useState("");
+  const [disguised, setDisguised] = useState(false);
   const [pinInput, setPinInput] = useState("");
   const [pinError, setPinError] = useState("");
 
@@ -74,20 +83,38 @@ export default function CoupleChat() {
   const [newPin, setNewPin] = useState("");
   const [pinMsg, setPinMsg] = useState("");
 
+  const [showDoodle, setShowDoodle] = useState(false);
+  const [showFun, setShowFun] = useState(false);
+  const [showMenu, setShowMenu] = useState(false);
+  const [showSearch, setShowSearch] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+
+  const [recording, setRecording] = useState(false);
+  const [themeKey, setThemeKey] = useState("rose");
+  const [secretMode, setSecretMode] = useState(false);
+  const [replyTo, setReplyTo] = useState(null);
+  const [revealedIds, setRevealedIds] = useState({});
+
   const [muted, setMuted] = useState(false);
   const [messages, setMessages] = useState([]);
   const [text, setText] = useState("");
   const [presenceMap, setPresenceMap] = useState({});
   const [typingStatus, setTypingStatus] = useState({});
+  const [readMap, setReadMap] = useState({});
   const [now, setNow] = useState(Date.now());
 
   const bottomRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef = useRef([]);
   const typingTimeoutRef = useRef(null);
   const isTypingRef = useRef(false);
   const lastTapRef = useRef({ id: null, time: 0 });
   const initialLoadDoneRef = useRef(false);
   const lastMsgIdRef = useRef(null);
   const mutedRef = useRef(false);
+
+  const theme = THEMES[themeKey] || THEMES.rose;
 
   useEffect(() => {
     const savedMute = localStorage.getItem("couple_muted") === "true";
@@ -102,11 +129,15 @@ export default function CoupleChat() {
 
   useEffect(() => {
     const unsubPins = onSnapshot(doc(db, "settings", "pins"), (docSnap) => {
-      if (docSnap.exists()) {
-        setPins({ ...DEFAULT_PINS, ...docSnap.data() });
-      }
+      if (docSnap.exists()) setPins({ ...DEFAULT_PINS, ...docSnap.data() });
     });
-    return () => unsubPins();
+    const unsubTheme = onSnapshot(doc(db, "settings", "theme"), (docSnap) => {
+      if (docSnap.exists() && docSnap.data().key) setThemeKey(docSnap.data().key);
+    });
+    return () => {
+      unsubPins();
+      unsubTheme();
+    };
   }, []);
 
   useEffect(() => {
@@ -124,15 +155,23 @@ export default function CoupleChat() {
       );
     };
 
-    updatePresence(true);
-    const heartbeat = setInterval(() => {
-      if (document.visibilityState === "visible") {
-        updatePresence(true);
+    const markRead = () => {
+      if (document.visibilityState === "visible" && !disguised) {
+        setDoc(doc(db, "status", "read"), { [currentUser]: Date.now() }, { merge: true });
       }
+    };
+
+    updatePresence(true);
+    markRead();
+
+    const heartbeat = setInterval(() => {
+      if (document.visibilityState === "visible") updatePresence(true);
     }, 25000);
 
     const handleVisibility = () => {
-      updatePresence(document.visibilityState === "visible");
+      const visible = document.visibilityState === "visible";
+      updatePresence(visible);
+      if (visible) markRead();
     };
     const handleUnload = () => updatePresence(false);
 
@@ -152,18 +191,21 @@ export default function CoupleChat() {
         if (latest.sender !== currentUser && !mutedRef.current) {
           playNotificationSound();
         }
+        markRead();
       }
 
       setMessages(list);
       setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
     });
 
-    const unsubPresence = onSnapshot(doc(db, "status", "presence"), (docSnap) => {
-      if (docSnap.exists()) setPresenceMap(docSnap.data());
+    const unsubPresence = onSnapshot(doc(db, "status", "presence"), (s) => {
+      if (s.exists()) setPresenceMap(s.data());
     });
-
-    const unsubTyping = onSnapshot(doc(db, "status", "typing"), (docSnap) => {
-      if (docSnap.exists()) setTypingStatus(docSnap.data());
+    const unsubTyping = onSnapshot(doc(db, "status", "typing"), (s) => {
+      if (s.exists()) setTypingStatus(s.data());
+    });
+    const unsubRead = onSnapshot(doc(db, "status", "read"), (s) => {
+      if (s.exists()) setReadMap(s.data());
     });
 
     return () => {
@@ -174,8 +216,9 @@ export default function CoupleChat() {
       unsubMessages();
       unsubPresence();
       unsubTyping();
+      unsubRead();
     };
-  }, [currentUser]);
+  }, [currentUser, disguised]);
 
   const toggleMute = () => {
     const next = !muted;
@@ -183,6 +226,11 @@ export default function CoupleChat() {
     mutedRef.current = next;
     localStorage.setItem("couple_muted", String(next));
     if (!next) playNotificationSound();
+  };
+
+  const changeTheme = async (key) => {
+    setThemeKey(key);
+    await setDoc(doc(db, "settings", "theme"), { key }, { merge: true });
   };
 
   const handleUnlock = (e) => {
@@ -205,21 +253,10 @@ export default function CoupleChat() {
     e.preventDefault();
     const cleaned = newPin.trim();
     const otherUser = currentUser === USER_1 ? USER_2 : USER_1;
+    if (cleaned.length < 4) return setPinMsg("কমপক্ষে ৪ সংখ্যার PIN দাও");
+    if (cleaned === pins[otherUser]) return setPinMsg("এই PIN অন্যজন ব্যবহার করছে");
 
-    if (cleaned.length < 4) {
-      setPinMsg("কমপক্ষে ৪ সংখ্যার PIN দাও");
-      return;
-    }
-    if (cleaned === pins[otherUser]) {
-      setPinMsg("এই PIN অন্যজন ব্যবহার করছে, অন্য একটা দাও");
-      return;
-    }
-
-    await setDoc(
-      doc(db, "settings", "pins"),
-      { [currentUser]: cleaned },
-      { merge: true }
-    );
+    await setDoc(doc(db, "settings", "pins"), { [currentUser]: cleaned }, { merge: true });
     setNewPin("");
     setPinMsg("PIN পরিবর্তন হয়েছে!");
     setTimeout(() => {
@@ -237,7 +274,6 @@ export default function CoupleChat() {
   const handleInputChange = (e) => {
     const val = e.target.value;
     setText(val);
-
     if (val.trim().length > 0) {
       setTyping(true);
       if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
@@ -251,7 +287,14 @@ export default function CoupleChat() {
     e.preventDefault();
     if (!text.trim() || !currentUser) return;
     const msg = text.trim();
+    const replyData = replyTo
+      ? { text: replyTo.text || (replyTo.audio ? "Voice Note" : "Photo"), sender: replyTo.sender }
+      : null;
+    const isSecret = secretMode;
+
     setText("");
+    setReplyTo(null);
+    setSecretMode(false);
     if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
     setTyping(false);
 
@@ -259,11 +302,111 @@ export default function CoupleChat() {
       text: msg,
       sender: currentUser,
       reaction: "",
+      viewOnce: isSecret,
+      opened: false,
+      replyTo: replyData,
       createdAt: serverTimestamp(),
     });
   };
 
+  const sendImageData = async (dataUrl) => {
+    if (!currentUser) return;
+    await addDoc(collection(db, "messages"), {
+      text: "",
+      image: dataUrl,
+      sender: currentUser,
+      reaction: "",
+      createdAt: serverTimestamp(),
+    });
+  };
+
+  const handlePhotoPick = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const img = new Image();
+      img.onload = () => {
+        const maxSide = 720;
+        let { width, height } = img;
+        if (width > maxSide || height > maxSide) {
+          if (width > height) {
+            height = Math.round((height * maxSide) / width);
+            width = maxSide;
+          } else {
+            width = Math.round((width * maxSide) / height);
+            height = maxSide;
+          }
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+        sendImageData(canvas.toDataURL("image/jpeg", 0.65));
+      };
+      img.src = ev.target.result;
+    };
+    reader.readAsDataURL(file);
+    e.target.value = "";
+  };
+
+  const toggleRecording = async () => {
+    if (recording && mediaRecorderRef.current) {
+      mediaRecorderRef.current.stop();
+      setRecording(false);
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      audioChunksRef.current = [];
+
+      recorder.ondataavailable = (ev) => {
+        if (ev.data.size > 0) audioChunksRef.current.push(ev.data);
+      };
+
+      recorder.onstop = () => {
+        stream.getTracks().forEach((t) => t.stop());
+        const blob = new Blob(audioChunksRef.current, { type: recorder.mimeType || "audio/webm" });
+        const reader = new FileReader();
+        reader.onloadend = async () => {
+          await addDoc(collection(db, "messages"), {
+            text: "",
+            audio: reader.result,
+            sender: currentUser,
+            reaction: "",
+            createdAt: serverTimestamp(),
+          });
+        };
+        reader.readAsDataURL(blob);
+      };
+
+      mediaRecorderRef.current = recorder;
+      recorder.start();
+      setRecording(true);
+    } catch {
+      alert("মাইক্রোফোন পারমিশন দাও");
+    }
+  };
+
+  const openSecretMessage = async (msg) => {
+    if (msg.sender === currentUser || revealedIds[msg.id]) return;
+    setRevealedIds((prev) => ({ ...prev, [msg.id]: true }));
+    setTimeout(async () => {
+      await updateDoc(doc(db, "messages", msg.id), {
+        text: "Secret message opened",
+        viewOnce: false,
+        opened: true,
+      });
+    }, 6000);
+  };
+
   const handleDoubleTap = async (msg) => {
+    if (msg.viewOnce && msg.sender !== currentUser) {
+      openSecretMessage(msg);
+      return;
+    }
     const nowTime = Date.now();
     if (lastTapRef.current.id === msg.id && nowTime - lastTapRef.current.time < 300) {
       lastTapRef.current = { id: null, time: 0 };
@@ -275,15 +418,21 @@ export default function CoupleChat() {
     }
   };
 
-  const otherUser = currentUser === USER_1 ? USER_2 : USER_1;
-  const statusText = typingStatus[otherUser]
-    ? "Typing..."
-    : formatLastSeen(presenceMap[otherUser], now);
-  const isOtherOnline = statusText === "Online";
+  if (disguised) {
+    return (
+      <CalculatorDisguise
+        pins={pins}
+        onUnlock={(user) => {
+          setCurrentUser(user);
+          setDisguised(false);
+        }}
+      />
+    );
+  }
 
   if (!currentUser) {
     return (
-      <div className="min-h-dvh w-full bg-neutral-950 text-white flex items-center justify-center px-6">
+      <div className="flex min-h-dvh w-full items-center justify-center bg-neutral-950 px-6 text-white">
         <form
           onSubmit={handleUnlock}
           className="w-full max-w-xs space-y-4 rounded-2xl border border-neutral-800 bg-neutral-900 p-6 text-center"
@@ -301,7 +450,7 @@ export default function CoupleChat() {
           {pinError && <p className="text-xs text-rose-400">{pinError}</p>}
           <button
             type="submit"
-            className="w-full rounded-xl bg-rose-600 py-3 text-sm font-medium text-white active:scale-95"
+            className={`w-full rounded-xl ${theme.btn} py-3 text-sm font-medium text-white active:scale-95`}
           >
             Unlock
           </button>
@@ -310,16 +459,33 @@ export default function CoupleChat() {
     );
   }
 
+  const otherUser = currentUser === USER_1 ? USER_2 : USER_1;
+  const statusText = typingStatus[otherUser]
+    ? "Typing..."
+    : formatLastSeen(presenceMap[otherUser], now);
+  const isOtherOnline = statusText === "Online";
+
+  const lastMyMsg = [...messages].reverse().find((m) => m.sender === currentUser);
+  const lastMyMsgTime = lastMyMsg?.createdAt?.toMillis ? lastMyMsg.createdAt.toMillis() : 0;
+  const isSeen = lastMyMsg && readMap[otherUser] && readMap[otherUser] >= lastMyMsgTime;
+
+  const displayedMessages = searchQuery.trim()
+    ? messages.filter((m) =>
+        m.text?.toLowerCase().includes(searchQuery.trim().toLowerCase())
+      )
+    : messages;
+
   return (
-    <div className="min-h-dvh w-full bg-neutral-950 text-white flex justify-center">
+    <div className="flex min-h-dvh w-full justify-center bg-neutral-950 text-white">
       <main className="relative flex h-dvh w-full max-w-md flex-col overflow-hidden bg-neutral-950">
-        <header className="flex items-center justify-between border-b border-neutral-800 px-4 py-3">
+        {/* ক্লিন হেডার */}
+        <header className="relative flex items-center justify-between border-b border-neutral-800 px-4 py-3">
           <div>
             <h1 className="text-base font-semibold">{otherUser}</h1>
             <p
               className={`text-xs ${
                 typingStatus[otherUser]
-                  ? "text-rose-400"
+                  ? theme.accent
                   : isOtherOnline
                   ? "text-emerald-400"
                   : "text-neutral-400"
@@ -328,37 +494,105 @@ export default function CoupleChat() {
               {statusText}
             </p>
           </div>
-          <div className="flex gap-2">
+          <div className="flex items-center gap-2">
             <button
-              onClick={toggleMute}
-              className="rounded-lg border border-neutral-800 px-2.5 py-1 text-xs text-neutral-300"
+              onClick={() => setShowFun(true)}
+              className="rounded-lg border border-neutral-800 px-2.5 py-1 text-xs text-neutral-200"
             >
-              {muted ? "Muted" : "Sound"}
-            </button>
-            <button
-              onClick={() => {
-                setShowPinModal(true);
-                setPinMsg("");
-                setNewPin("");
-              }}
-              className="rounded-lg border border-neutral-800 px-2.5 py-1 text-xs text-neutral-400"
-            >
-              PIN
+              Play
             </button>
             <button
               onClick={() => {
                 setTyping(false);
-                setCurrentUser("");
+                setDisguised(true);
               }}
-              className="rounded-lg border border-neutral-800 px-2.5 py-1 text-xs text-neutral-400"
+              className="rounded-lg border border-neutral-800 px-2.5 py-1 text-xs text-amber-400"
             >
-              Lock
+              Hide
+            </button>
+            <button
+              onClick={() => setShowMenu(!showMenu)}
+              className="rounded-lg border border-neutral-800 px-2.5 py-1 text-xs text-neutral-300"
+            >
+              ⋮
             </button>
           </div>
+
+          {showMenu && (
+            <div className="absolute right-4 top-14 z-20 w-44 space-y-2.5 rounded-2xl border border-neutral-800 bg-neutral-900 p-3 shadow-xl">
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-neutral-400">Theme</span>
+                <div className="flex gap-1.5">
+                  {Object.keys(THEMES).map((k) => (
+                    <button
+                      key={k}
+                      onClick={() => changeTheme(k)}
+                      className={`h-4 w-4 rounded-full ${THEMES[k].dot} ${
+                        themeKey === k ? "ring-2 ring-white ring-offset-1 ring-offset-neutral-900" : "opacity-60"
+                      }`}
+                    />
+                  ))}
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  setShowMenu(false);
+                  setShowSearch(true);
+                }}
+                className="w-full rounded-lg bg-neutral-800 px-3 py-1.5 text-left text-xs text-neutral-200"
+              >
+                Search Messages
+              </button>
+              <button
+                onClick={() => {
+                  toggleMute();
+                  setShowMenu(false);
+                }}
+                className="w-full rounded-lg bg-neutral-800 px-3 py-1.5 text-left text-xs text-neutral-200"
+              >
+                Sound: {muted ? "Off (Muted)" : "On"}
+              </button>
+              <button
+                onClick={() => {
+                  setShowMenu(false);
+                  setShowPinModal(true);
+                  setPinMsg("");
+                  setNewPin("");
+                }}
+                className="w-full rounded-lg bg-neutral-800 px-3 py-1.5 text-left text-xs text-neutral-200"
+              >
+                Change PIN
+              </button>
+            </div>
+          )}
         </header>
 
+        {/* সার্চ বার */}
+        {showSearch && (
+          <div className="flex items-center gap-2 border-b border-neutral-800 bg-neutral-900 px-4 py-2">
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="মেসেজ খুঁজুন..."
+              autoFocus
+              className="min-w-0 flex-1 bg-transparent text-xs text-white outline-none"
+            />
+            <button
+              onClick={() => {
+                setShowSearch(false);
+                setSearchQuery("");
+              }}
+              className="text-xs text-neutral-400"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
+        {/* মেসেজ লিস্ট */}
         <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
-          {messages.map((msg) => {
+          {displayedMessages.map((msg) => {
             const isMe = msg.sender === currentUser;
             const time = msg.createdAt?.toDate
               ? msg.createdAt.toDate().toLocaleTimeString([], {
@@ -366,6 +600,9 @@ export default function CoupleChat() {
                   minute: "2-digit",
                 })
               : "";
+            const isSecretHidden = msg.viewOnce && !isMe && !revealedIds[msg.id];
+            const showSeen = isMe && lastMyMsg?.id === msg.id && isSeen;
+            const ytId = !isSecretHidden && !msg.opened ? getYouTubeId(msg.text) : null;
 
             return (
               <div
@@ -374,13 +611,45 @@ export default function CoupleChat() {
               >
                 <div
                   onClick={() => handleDoubleTap(msg)}
-                  className={`relative max-w-[80%] cursor-pointer select-none rounded-2xl px-3.5 py-2 text-sm ${
-                    isMe
-                      ? "rounded-br-sm bg-rose-600 text-white"
+                  className={`relative max-w-[82%] cursor-pointer select-none rounded-2xl px-3.5 py-2 text-sm ${
+                    msg.opened
+                      ? "border border-neutral-800 bg-neutral-900 italic text-neutral-500"
+                      : isMe
+                      ? `rounded-br-sm ${theme.bubble} text-white`
                       : "rounded-bl-sm bg-neutral-800 text-neutral-100"
                   }`}
                 >
-                  {msg.text}
+                  {msg.replyTo && (
+                    <div className="mb-1.5 rounded-lg bg-black/25 px-2.5 py-1 text-xs text-white/80">
+                      <span className="font-semibold">{msg.replyTo.sender}: </span>
+                      {msg.replyTo.text}
+                    </div>
+                  )}
+
+                  {msg.image ? (
+                    <img src={msg.image} alt="Shared" className="max-h-56 rounded-lg" />
+                  ) : msg.audio ? (
+                    <audio controls src={msg.audio} className="h-9 w-52" />
+                  ) : isSecretHidden ? (
+                    <span>🔒 Secret message (Tap to view)</span>
+                  ) : (
+                    <span>
+                      {msg.viewOnce && isMe ? "🔒 " : ""}
+                      {msg.text}
+                    </span>
+                  )}
+
+                  {ytId && (
+                    <div className="mt-2 overflow-hidden rounded-xl">
+                      <iframe
+                        src={`https://www.youtube.com/embed/${ytId}`}
+                        className="aspect-video w-56"
+                        allow="autoplay; encrypted-media"
+                        allowFullScreen
+                      />
+                    </div>
+                  )}
+
                   {msg.reaction && (
                     <span
                       className={`absolute -bottom-2.5 ${
@@ -391,36 +660,119 @@ export default function CoupleChat() {
                     </span>
                   )}
                 </div>
-                {time && (
-                  <span className="mt-1 text-[10px] text-neutral-500">{time}</span>
-                )}
+
+                <div className="mt-1 flex items-center gap-2 text-[10px] text-neutral-500">
+                  {time && <span>{time}</span>}
+                  {!msg.opened && !msg.viewOnce && (
+                    <button
+                      onClick={() => setReplyTo(msg)}
+                      className="text-neutral-400 hover:text-white"
+                    >
+                      Reply
+                    </button>
+                  )}
+                  {showSeen && <span className={theme.accent}>Seen</span>}
+                </div>
               </div>
             );
           })}
           <div ref={bottomRef} />
         </div>
 
-        <form
-          onSubmit={sendMessage}
-          className="flex items-center gap-2 border-t border-neutral-800 px-3 py-3"
-        >
-          <input
-            type="text"
-            value={text}
-            onChange={handleInputChange}
-            placeholder="Write something..."
-            className="flex-1 rounded-full border border-neutral-800 bg-neutral-900 px-4 py-2.5 text-sm outline-none focus:border-rose-500"
+        {/* রিপ্লাই প্রিভিউ */}
+        {replyTo && (
+          <div className="flex items-center justify-between border-t border-neutral-800 bg-neutral-900 px-4 py-2 text-xs">
+            <div className="truncate text-neutral-300">
+              <span className="font-semibold">{replyTo.sender}: </span>
+              {replyTo.text || (replyTo.audio ? "Voice Note" : "Photo")}
+            </div>
+            <button onClick={() => setReplyTo(null)} className="ml-3 text-neutral-400">
+              ✕
+            </button>
+          </div>
+        )}
+
+        {/* ইনপুট ও টুলবার */}
+        <div className="space-y-2 border-t border-neutral-800 px-3 py-2.5">
+          <div className="flex items-center gap-2">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              onChange={handlePhotoPick}
+              className="hidden"
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              className="rounded-full border border-neutral-800 bg-neutral-900 px-3 py-1 text-xs text-neutral-300"
+            >
+              Photo
+            </button>
+            <button
+              type="button"
+              onClick={toggleRecording}
+              className={`rounded-full border px-3 py-1 text-xs ${
+                recording
+                  ? "animate-pulse border-rose-500 bg-rose-600 text-white"
+                  : "border-neutral-800 bg-neutral-900 text-neutral-300"
+              }`}
+            >
+              {recording ? "Stop ●" : "Voice"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowDoodle(true)}
+              className="rounded-full border border-neutral-800 bg-neutral-900 px-3 py-1 text-xs text-neutral-300"
+            >
+              Draw
+            </button>
+            <button
+              type="button"
+              onClick={() => setSecretMode(!secretMode)}
+              className={`rounded-full border px-3 py-1 text-xs ${
+                secretMode
+                  ? `${theme.btn} border-transparent text-white`
+                  : "border-neutral-800 bg-neutral-900 text-neutral-400"
+              }`}
+            >
+              Secret 🔒
+            </button>
+          </div>
+
+          <form onSubmit={sendMessage} className="flex items-center gap-2">
+            <input
+              type="text"
+              value={text}
+              onChange={handleInputChange}
+              placeholder={secretMode ? "Secret message..." : "Write something..."}
+              className="min-w-0 flex-1 rounded-full border border-neutral-800 bg-neutral-900 px-4 py-2 text-sm outline-none focus:border-neutral-600"
+            />
+            <button
+              type="submit"
+              className={`rounded-full ${theme.btn} px-4 py-2 text-sm font-medium text-white active:scale-95`}
+            >
+              Send
+            </button>
+          </form>
+        </div>
+
+        {showDoodle && (
+          <DoodleModal onClose={() => setShowDoodle(false)} onSend={sendImageData} />
+        )}
+
+        {showFun && (
+          <FunModal
+            currentUser={currentUser}
+            otherUser={otherUser}
+            themeBtn={theme.btn}
+            messages={messages}
+            onClose={() => setShowFun(false)}
           />
-          <button
-            type="submit"
-            className="rounded-full bg-rose-600 px-4 py-2.5 text-sm font-medium text-white active:scale-95"
-          >
-            Send
-          </button>
-        </form>
+        )}
 
         {showPinModal && (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/70 px-6">
+          <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/70 px-6">
             <form
               onSubmit={handleChangePin}
               className="w-full max-w-xs space-y-4 rounded-2xl border border-neutral-800 bg-neutral-900 p-5 text-center"
@@ -432,9 +784,9 @@ export default function CoupleChat() {
                 value={newPin}
                 onChange={(e) => setNewPin(e.target.value)}
                 placeholder="নতুন PIN (কমপক্ষে ৪ সংখ্যা)"
-                className="w-full rounded-xl border border-neutral-700 bg-neutral-950 px-4 py-2.5 text-center text-sm tracking-widest outline-none focus:border-rose-500"
+                className="w-full rounded-xl border border-neutral-700 bg-neutral-950 px-4 py-2.5 text-center text-sm tracking-widest outline-none"
               />
-              {pinMsg && <p className="text-xs text-rose-400">{pinMsg}</p>}
+              {pinMsg && <p className={`text-xs ${theme.accent}`}>{pinMsg}</p>}
               <div className="flex gap-2">
                 <button
                   type="button"
@@ -445,7 +797,7 @@ export default function CoupleChat() {
                 </button>
                 <button
                   type="submit"
-                  className="flex-1 rounded-xl bg-rose-600 py-2 text-xs font-medium text-white"
+                  className={`flex-1 rounded-xl ${theme.btn} py-2 text-xs font-medium text-white`}
                 >
                   Save
                 </button>
