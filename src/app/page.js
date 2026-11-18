@@ -14,36 +14,93 @@ import {
   updateDoc,
 } from "firebase/firestore";
 
-// এখান থেকে পিন আর তোমাদের নাম বদলাতে পারবে
-const SECRET_PIN = "8520";
 const USER_1 = "Joy";
 const USER_2 = "Meher";
 
-const MOODS = ["❤️ Miss you", "😊 Happy", "🎧 Music", "😴 Sleepy", "🥺 Busy"];
+const DEFAULT_PINS = {
+  [USER_1]: "1111",
+  [USER_2]: "2222",
+};
+
+function formatLastSeen(presence, now) {
+  if (!presence) return "Offline";
+  const isOnline = presence.online && now - presence.lastSeen < 45000;
+  if (isOnline) return "Online";
+
+  if (!presence.lastSeen) return "Offline";
+  const diffSec = Math.floor((now - presence.lastSeen) / 1000);
+  if (diffSec < 60) return "Last seen just now";
+  const mins = Math.floor(diffSec / 60);
+  if (mins < 60) return `Last seen ${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `Last seen ${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  return `Last seen ${days}d ago`;
+}
 
 export default function CoupleChat() {
-  const [unlocked, setUnlocked] = useState(false);
-  const [pinInput, setPinInput] = useState("");
-  const [pinError, setPinError] = useState(false);
-
+  const [pins, setPins] = useState(DEFAULT_PINS);
   const [currentUser, setCurrentUser] = useState("");
+  const [pinInput, setPinInput] = useState("");
+  const [pinError, setPinError] = useState("");
+
+  const [showPinModal, setShowPinModal] = useState(false);
+  const [newPin, setNewPin] = useState("");
+  const [pinMsg, setPinMsg] = useState("");
+
   const [messages, setMessages] = useState([]);
   const [text, setText] = useState("");
-  const [partnerMood, setPartnerMood] = useState({});
+  const [presenceMap, setPresenceMap] = useState({});
   const [typingStatus, setTypingStatus] = useState({});
+  const [now, setNow] = useState(Date.now());
 
   const bottomRef = useRef(null);
   const typingTimeoutRef = useRef(null);
   const isTypingRef = useRef(false);
   const lastTapRef = useRef({ id: null, time: 0 });
 
+  // প্রতি ১৫ সেকেন্ডে সময় আপডেট করা যেন Last seen ঠিক থাকে
   useEffect(() => {
-    const savedUser = localStorage.getItem("couple_user");
-    if (savedUser) setCurrentUser(savedUser);
+    const timer = setInterval(() => setNow(Date.now()), 15000);
+    return () => clearInterval(timer);
   }, []);
 
+  // Firestore থেকে সেভ করা PIN লোড করা
   useEffect(() => {
-    if (!unlocked) return;
+    const unsubPins = onSnapshot(doc(db, "settings", "pins"), (docSnap) => {
+      if (docSnap.exists()) {
+        setPins({ ...DEFAULT_PINS, ...docSnap.data() });
+      }
+    });
+    return () => unsubPins();
+  }, []);
+
+  // লগইন হলে মেসেজ, টাইপিং ও Online/Last seen আপডেট রাখা
+  useEffect(() => {
+    if (!currentUser) return;
+
+    const updatePresence = (online) => {
+      setDoc(
+        doc(db, "status", "presence"),
+        { [currentUser]: { online, lastSeen: Date.now() } },
+        { merge: true }
+      );
+    };
+
+    updatePresence(true);
+    const heartbeat = setInterval(() => {
+      if (document.visibilityState === "visible") {
+        updatePresence(true);
+      }
+    }, 25000);
+
+    const handleVisibility = () => {
+      updatePresence(document.visibilityState === "visible");
+    };
+    const handleUnload = () => updatePresence(false);
+
+    document.addEventListener("visibilitychange", handleVisibility);
+    window.addEventListener("beforeunload", handleUnload);
 
     const q = query(collection(db, "messages"), orderBy("createdAt", "asc"));
     const unsubMessages = onSnapshot(q, (snapshot) => {
@@ -52,8 +109,8 @@ export default function CoupleChat() {
       setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
     });
 
-    const unsubMood = onSnapshot(doc(db, "status", "moods"), (docSnap) => {
-      if (docSnap.exists()) setPartnerMood(docSnap.data());
+    const unsubPresence = onSnapshot(doc(db, "status", "presence"), (docSnap) => {
+      if (docSnap.exists()) setPresenceMap(docSnap.data());
     });
 
     const unsubTyping = onSnapshot(doc(db, "status", "typing"), (docSnap) => {
@@ -61,26 +118,57 @@ export default function CoupleChat() {
     });
 
     return () => {
+      clearInterval(heartbeat);
+      document.removeEventListener("visibilitychange", handleVisibility);
+      window.removeEventListener("beforeunload", handleUnload);
+      updatePresence(false);
       unsubMessages();
-      unsubMood();
+      unsubPresence();
       unsubTyping();
     };
-  }, [unlocked]);
+  }, [currentUser]);
 
   const handleUnlock = (e) => {
     e.preventDefault();
-    if (pinInput === SECRET_PIN) {
-      setUnlocked(true);
-      setPinError(false);
+    const entered = pinInput.trim();
+    if (entered === pins[USER_1]) {
+      setCurrentUser(USER_1);
+      setPinError("");
+      setPinInput("");
+    } else if (entered === pins[USER_2]) {
+      setCurrentUser(USER_2);
+      setPinError("");
       setPinInput("");
     } else {
-      setPinError(true);
+      setPinError("ভুল PIN, আবার চেষ্টা করো");
     }
   };
 
-  const selectUser = (name) => {
-    setCurrentUser(name);
-    localStorage.setItem("couple_user", name);
+  const handleChangePin = async (e) => {
+    e.preventDefault();
+    const cleaned = newPin.trim();
+    const otherUser = currentUser === USER_1 ? USER_2 : USER_1;
+
+    if (cleaned.length < 4) {
+      setPinMsg("কমপক্ষে ৪ সংখ্যার PIN দাও");
+      return;
+    }
+    if (cleaned === pins[otherUser]) {
+      setPinMsg("এই PIN অন্যজন ব্যবহার করছে, অন্য একটা দাও");
+      return;
+    }
+
+    await setDoc(
+      doc(db, "settings", "pins"),
+      { [currentUser]: cleaned },
+      { merge: true }
+    );
+    setNewPin("");
+    setPinMsg("PIN পরিবর্তন হয়েছে!");
+    setTimeout(() => {
+      setShowPinModal(false);
+      setPinMsg("");
+    }, 1000);
   };
 
   const setTyping = async (state) => {
@@ -118,31 +206,25 @@ export default function CoupleChat() {
     });
   };
 
-  // মোবাইল ও ডেস্কটপ দুই জায়গাতেই ডাবল-ট্যাপ কাজ করার জন্য
   const handleDoubleTap = async (msg) => {
-    const now = Date.now();
-    if (lastTapRef.current.id === msg.id && now - lastTapRef.current.time < 300) {
+    const nowTime = Date.now();
+    if (lastTapRef.current.id === msg.id && nowTime - lastTapRef.current.time < 300) {
       lastTapRef.current = { id: null, time: 0 };
       await updateDoc(doc(db, "messages", msg.id), {
         reaction: msg.reaction ? "" : "❤️",
       });
     } else {
-      lastTapRef.current = { id: msg.id, time: now };
+      lastTapRef.current = { id: msg.id, time: nowTime };
     }
   };
 
-  const updateMood = async (mood) => {
-    if (!currentUser) return;
-    await setDoc(
-      doc(db, "status", "moods"),
-      { [currentUser]: mood },
-      { merge: true }
-    );
-  };
-
   const otherUser = currentUser === USER_1 ? USER_2 : USER_1;
+  const statusText = typingStatus[otherUser]
+    ? "Typing..."
+    : formatLastSeen(presenceMap[otherUser], now);
+  const isOtherOnline = statusText === "Online";
 
-  if (!unlocked) {
+  if (!currentUser) {
     return (
       <main className="flex min-h-dvh items-center justify-center bg-neutral-950 px-6 text-white">
         <form
@@ -150,7 +232,7 @@ export default function CoupleChat() {
           className="w-full max-w-xs space-y-4 rounded-2xl border border-neutral-800 bg-neutral-900 p-6 text-center"
         >
           <h1 className="text-xl font-semibold">Private Space</h1>
-          <p className="text-xs text-neutral-400">ঢুকতে সিক্রেট PIN দাও</p>
+          <p className="text-xs text-neutral-400">ঢুকতে তোমার নিজের PIN দাও</p>
           <input
             type="password"
             inputMode="numeric"
@@ -159,7 +241,7 @@ export default function CoupleChat() {
             placeholder="••••"
             className="w-full rounded-xl border border-neutral-700 bg-neutral-950 px-4 py-3 text-center text-lg tracking-widest outline-none focus:border-rose-500"
           />
-          {pinError && <p className="text-xs text-rose-400">ভুল PIN, আবার চেষ্টা করো</p>}
+          {pinError && <p className="text-xs text-rose-400">{pinError}</p>}
           <button
             type="submit"
             className="w-full rounded-xl bg-rose-600 py-3 text-sm font-medium text-white active:scale-95"
@@ -171,75 +253,45 @@ export default function CoupleChat() {
     );
   }
 
-  if (!currentUser) {
-    return (
-      <main className="flex min-h-dvh items-center justify-center bg-neutral-950 px-6 text-white">
-        <div className="w-full max-w-xs space-y-4 rounded-2xl border border-neutral-800 bg-neutral-900 p-6 text-center">
-          <h2 className="text-lg font-medium">তুমি কে?</h2>
-          <div className="grid grid-cols-2 gap-3">
-            <button
-              onClick={() => selectUser(USER_1)}
-              className="rounded-xl border border-neutral-700 bg-neutral-800 py-3 text-sm font-medium hover:border-rose-500"
-            >
-              {USER_1}
-            </button>
-            <button
-              onClick={() => selectUser(USER_2)}
-              className="rounded-xl border border-neutral-700 bg-neutral-800 py-3 text-sm font-medium hover:border-rose-500"
-            >
-              {USER_2}
-            </button>
-          </div>
-        </div>
-      </main>
-    );
-  }
-
   return (
-    <main className="mx-auto flex h-dvh max-w-md flex-col bg-neutral-950 text-white">
+    <main className="relative mx-auto flex h-dvh max-w-md flex-col bg-neutral-950 text-white">
       <header className="flex items-center justify-between border-b border-neutral-800 px-4 py-3">
         <div>
           <h1 className="text-base font-semibold">{otherUser}</h1>
-          <p className="text-xs text-rose-400">
-            {typingStatus[otherUser]
-              ? "Typing..."
-              : partnerMood[otherUser] || "Online in our space"}
+          <p
+            className={`text-xs ${
+              typingStatus[otherUser]
+                ? "text-rose-400"
+                : isOtherOnline
+                ? "text-emerald-400"
+                : "text-neutral-400"
+            }`}
+          >
+            {statusText}
           </p>
         </div>
         <div className="flex gap-2">
           <button
             onClick={() => {
-              localStorage.removeItem("couple_user");
-              setCurrentUser("");
+              setShowPinModal(true);
+              setPinMsg("");
+              setNewPin("");
             }}
             className="rounded-lg border border-neutral-800 px-2.5 py-1 text-xs text-neutral-400"
           >
-            Switch
+            PIN
           </button>
           <button
-            onClick={() => setUnlocked(false)}
+            onClick={() => {
+              setTyping(false);
+              setCurrentUser("");
+            }}
             className="rounded-lg border border-neutral-800 px-2.5 py-1 text-xs text-neutral-400"
           >
             Lock
           </button>
         </div>
       </header>
-
-      <div className="flex gap-2 overflow-x-auto border-b border-neutral-900 px-4 py-2">
-        {MOODS.map((m) => (
-          <button
-            key={m}
-            onClick={() => updateMood(m)}
-            className={`shrink-0 rounded-full px-3 py-1 text-xs ${
-              partnerMood[currentUser] === m
-                ? "bg-rose-600 text-white"
-                : "bg-neutral-900 text-neutral-300"
-            }`}
-          >
-            {m}
-          </button>
-        ))}
-      </div>
 
       <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
         {messages.map((msg) => {
@@ -302,6 +354,41 @@ export default function CoupleChat() {
           Send
         </button>
       </form>
+
+      {showPinModal && (
+        <div className="absolute inset-0 flex items-center justify-center bg-black/70 px-6">
+          <form
+            onSubmit={handleChangePin}
+            className="w-full max-w-xs space-y-4 rounded-2xl border border-neutral-800 bg-neutral-900 p-5 text-center"
+          >
+            <h2 className="text-base font-semibold">{currentUser}-এর PIN বদলাও</h2>
+            <input
+              type="password"
+              inputMode="numeric"
+              value={newPin}
+              onChange={(e) => setNewPin(e.target.value)}
+              placeholder="নতুন PIN (কমপক্ষে ৪ সংখ্যা)"
+              className="w-full rounded-xl border border-neutral-700 bg-neutral-950 px-4 py-2.5 text-center text-sm tracking-widest outline-none focus:border-rose-500"
+            />
+            {pinMsg && <p className="text-xs text-rose-400">{pinMsg}</p>}
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setShowPinModal(false)}
+                className="flex-1 rounded-xl border border-neutral-700 py-2 text-xs text-neutral-300"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="flex-1 rounded-xl bg-rose-600 py-2 text-xs font-medium text-white"
+              >
+                Save
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </main>
   );
 }
