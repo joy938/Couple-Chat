@@ -75,6 +75,7 @@ function playNotificationSound() {
 export default function CoupleChat() {
   const [roomInput, setRoomInput] = useState("");
   const [activeRoom, setActiveRoom] = useState("");
+  const [hasSavedRoom, setHasSavedRoom] = useState(false);
   const [roomUsers, setRoomUsers] = useState(["Joy", "Meher"]);
   const [pins, setPins] = useState({});
 
@@ -147,7 +148,10 @@ export default function CoupleChat() {
     mutedRef.current = savedMute;
 
     const savedRoom = localStorage.getItem("couple_room");
-    if (savedRoom) setRoomInput(savedRoom);
+    if (savedRoom) {
+      setRoomInput(savedRoom);
+      setHasSavedRoom(true);
+    }
 
     return () => {
       if (recTimerRef.current) clearInterval(recTimerRef.current);
@@ -309,6 +313,7 @@ export default function CoupleChat() {
     if (matched) {
       setCurrentUser(matched[0]);
       localStorage.setItem("couple_room", activeRoom);
+      setHasSavedRoom(true);
       setPinError("");
       setPinInput("");
     } else {
@@ -340,6 +345,7 @@ export default function CoupleChat() {
 
     setRoomInput(rid);
     localStorage.setItem("couple_room", rid);
+    setHasSavedRoom(true);
     setShowCreateRoom(false);
     setCreateMsg("");
     setNewRoomId("");
@@ -569,14 +575,18 @@ export default function CoupleChat() {
             className="w-full max-w-xs space-y-3.5 rounded-2xl border border-neutral-800 bg-neutral-900 p-6 text-center"
           >
             <h1 className="text-xl font-semibold">Private Space</h1>
-            <p className="text-xs text-neutral-400">রুম কোড ও তোমার PIN দাও</p>
-            <input
-              type="text"
-              value={roomInput}
-              onChange={(e) => setRoomInput(e.target.value)}
-              placeholder="Room Code"
-              className="w-full rounded-xl border border-neutral-700 bg-neutral-950 px-4 py-2.5 text-center text-sm outline-none focus:border-rose-500"
-            />
+            <p className="text-xs text-neutral-400">
+              {hasSavedRoom ? "ঢুকতে তোমার PIN দাও" : "রুম কোড ও তোমার PIN দাও"}
+            </p>
+            {!hasSavedRoom && (
+              <input
+                type="text"
+                value={roomInput}
+                onChange={(e) => setRoomInput(e.target.value)}
+                placeholder="Room Code"
+                className="w-full rounded-xl border border-neutral-700 bg-neutral-950 px-4 py-2.5 text-center text-sm outline-none focus:border-rose-500"
+              />
+            )}
             <input
               type="password"
               inputMode="numeric"
@@ -592,13 +602,27 @@ export default function CoupleChat() {
             >
               Unlock
             </button>
-            <button
-              type="button"
-              onClick={() => setShowCreateRoom(true)}
-              className="w-full pt-1 text-xs text-neutral-400 underline"
-            >
-              + বন্ধুদের জন্য নতুন রুম বানাও
-            </button>
+            <div className="flex items-center justify-center gap-4 pt-1">
+              {hasSavedRoom && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setHasSavedRoom(false);
+                    setPinError("");
+                  }}
+                  className="text-xs text-neutral-400 underline"
+                >
+                  Change Room
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setShowCreateRoom(true)}
+                className="text-xs text-neutral-400 underline"
+              >
+                + New Room
+              </button>
+            </div>
           </form>
         ) : (
           <form
