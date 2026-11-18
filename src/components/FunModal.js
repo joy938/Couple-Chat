@@ -2,7 +2,15 @@
 
 import { useState, useEffect, useRef } from "react";
 import { db } from "@/lib/firebase";
-import { doc, onSnapshot, setDoc, arrayUnion } from "firebase/firestore";
+import {
+  doc,
+  onSnapshot,
+  setDoc,
+  arrayUnion,
+  collection,
+  addDoc,
+  serverTimestamp,
+} from "firebase/firestore";
 
 const QUESTIONS = [
   "আজকের দিনের সবচেয়ে সুন্দর মুহূর্ত কোনটা ছিল?",
@@ -74,7 +82,7 @@ export default function FunModal({
   const [previewImg, setPreviewImg] = useState(null);
   const [answers, setAnswers] = useState({});
   const [myAnswer, setMyAnswer] = useState("");
-  const [game, setGame] = useState({ board: Array(9).fill(""), turn: "Joy", winner: "" });
+  const [game, setGame] = useState({ board: Array(9).fill(""), turn: "", winner: "" });
 
   const [currentCard, setCurrentCard] = useState(null);
   const [customPrompts, setCustomPrompts] = useState({
@@ -198,22 +206,34 @@ export default function FunModal({
   };
 
   const makeMove = async (idx) => {
-    if (game.board[idx] || game.winner || game.turn !== currentUser) return;
+    const isFirstMove = game.board.every((cell) => !cell);
+    if (game.board[idx] || game.winner || (!isFirstMove && game.turn !== currentUser)) return;
+
     const nextBoard = [...game.board];
     nextBoard[idx] = currentUser === "Joy" ? "X" : "O";
     const winner = checkWinner(nextBoard);
     const nextTurn = currentUser === "Joy" ? "Meher" : "Joy";
+
     await setDoc(doc(db, "fun", "tictactoe"), {
       board: nextBoard,
       turn: nextTurn,
       winner,
     });
+
+    if (isFirstMove) {
+      await addDoc(collection(db, "messages"), {
+        text: `🎮 ${currentUser} Tic-Tac-Toe শুরু করেছে! Play > Game-এ গিয়ে তোমার চাল দাও।`,
+        sender: currentUser,
+        reaction: "",
+        createdAt: serverTimestamp(),
+      });
+    }
   };
 
   const resetGame = async () => {
     await setDoc(doc(db, "fun", "tictactoe"), {
       board: Array(9).fill(""),
-      turn: "Joy",
+      turn: "",
       winner: "",
     });
   };
@@ -270,8 +290,8 @@ export default function FunModal({
   return (
     <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/80 px-4">
       <div className="w-full max-w-sm space-y-4 rounded-2xl border border-neutral-800 bg-neutral-900 p-4 text-white">
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex gap-1 overflow-x-auto">
+        <div className="flex items-start justify-between gap-2">
+          <div className="flex flex-wrap gap-1.5">
             {[
               ["question", "Daily"],
               ["game", "Game"],
@@ -286,7 +306,7 @@ export default function FunModal({
                   setTab(key);
                   setPreviewImg(null);
                 }}
-                className={`shrink-0 rounded-lg px-2.5 py-1.5 text-xs font-medium ${
+                className={`rounded-lg px-2.5 py-1 text-xs font-medium ${
                   tab === key ? `${themeBtn} text-white` : "bg-neutral-800 text-neutral-300"
                 }`}
               >
@@ -294,7 +314,7 @@ export default function FunModal({
               </button>
             ))}
           </div>
-          <button onClick={onClose} className="text-sm text-neutral-400">
+          <button onClick={onClose} className="pt-0.5 text-sm text-neutral-400">
             ✕
           </button>
         </div>
@@ -348,6 +368,8 @@ export default function FunModal({
                 ? "খেলা ড্র হয়েছে!"
                 : game.winner
                 ? `${game.winner === "X" ? "Joy" : "Meher"} জিতেছে!`
+                : game.board.every((c) => !c)
+                ? "যেকোনো একজন প্রথম চাল দিয়ে শুরু করো!"
                 : game.turn === currentUser
                 ? `তোমার চাল (${currentUser === "Joy" ? "X" : "O"})`
                 : `${otherUser}-এর চালের জন্য অপেক্ষা...`}
