@@ -12,17 +12,17 @@ import {
   doc,
   setDoc,
   updateDoc,
+  getDoc,
 } from "firebase/firestore";
 import CalculatorDisguise from "@/components/CalculatorDisguise";
 import DoodleModal from "@/components/DoodleModal";
 import FunModal from "@/components/FunModal";
 
-const USER_1 = "Joy";
-const USER_2 = "Meher";
+const DEFAULT_ROOM = "joy-meher";
 
 const DEFAULT_PINS = {
-  [USER_1]: "1111",
-  [USER_2]: "2222",
+  Joy: "1111",
+  Meher: "2222",
 };
 
 const THEMES = {
@@ -73,11 +73,23 @@ function playNotificationSound() {
 }
 
 export default function CoupleChat() {
-  const [pins, setPins] = useState(DEFAULT_PINS);
+  const [roomInput, setRoomInput] = useState("");
+  const [activeRoom, setActiveRoom] = useState("");
+  const [roomUsers, setRoomUsers] = useState(["Joy", "Meher"]);
+  const [pins, setPins] = useState({});
+
   const [currentUser, setCurrentUser] = useState("");
   const [disguised, setDisguised] = useState(false);
   const [pinInput, setPinInput] = useState("");
   const [pinError, setPinError] = useState("");
+
+  const [showCreateRoom, setShowCreateRoom] = useState(false);
+  const [newRoomId, setNewRoomId] = useState("");
+  const [newU1, setNewU1] = useState("");
+  const [newP1, setNewP1] = useState("");
+  const [newU2, setNewU2] = useState("");
+  const [newP2, setNewP2] = useState("");
+  const [createMsg, setCreateMsg] = useState("");
 
   const [showPinModal, setShowPinModal] = useState(false);
   const [newPin, setNewPin] = useState("");
@@ -88,12 +100,14 @@ export default function CoupleChat() {
   const [showMenu, setShowMenu] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [playAlert, setPlayAlert] = useState(false);
 
   const [recording, setRecording] = useState(false);
+  const [recSeconds, setRecSeconds] = useState(0);
   const [themeKey, setThemeKey] = useState("rose");
   const [secretMode, setSecretMode] = useState(false);
   const [replyTo, setReplyTo] = useState(null);
-  const [revealedIds, setRevealedIds] = useState({});
+  const [revealedTexts, setRevealedTexts] = useState({});
 
   const [muted, setMuted] = useState(false);
   const [messages, setMessages] = useState([]);
@@ -107,6 +121,7 @@ export default function CoupleChat() {
   const fileInputRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
+  const recTimerRef = useRef(null);
   const typingTimeoutRef = useRef(null);
   const isTypingRef = useRef(false);
   const lastTapRef = useRef({ id: null, time: 0 });
@@ -116,10 +131,27 @@ export default function CoupleChat() {
 
   const theme = THEMES[themeKey] || THEMES.rose;
 
+  const roomDoc = (col, id) =>
+    activeRoom === DEFAULT_ROOM
+      ? doc(db, col, id)
+      : doc(db, "rooms", activeRoom, col, id);
+
+  const messagesCol = () =>
+    activeRoom === DEFAULT_ROOM
+      ? collection(db, "messages")
+      : collection(db, "rooms", activeRoom, "messages");
+
   useEffect(() => {
     const savedMute = localStorage.getItem("couple_muted") === "true";
     setMuted(savedMute);
     mutedRef.current = savedMute;
+
+    const savedRoom = localStorage.getItem("couple_room");
+    if (savedRoom) setRoomInput(savedRoom);
+
+    return () => {
+      if (recTimerRef.current) clearInterval(recTimerRef.current);
+    };
   }, []);
 
   useEffect(() => {
@@ -128,20 +160,43 @@ export default function CoupleChat() {
   }, []);
 
   useEffect(() => {
-    const unsubPins = onSnapshot(doc(db, "settings", "pins"), (docSnap) => {
-      if (docSnap.exists()) setPins({ ...DEFAULT_PINS, ...docSnap.data() });
+    setActiveRoom(roomInput.trim().toLowerCase());
+  }, [roomInput]);
+
+  useEffect(() => {
+    if (!activeRoom) {
+      setPins({});
+      setThemeKey("rose");
+      return;
+    }
+
+    const unsubPins = onSnapshot(roomDoc("settings", "pins"), (docSnap) => {
+      if (activeRoom === DEFAULT_ROOM) {
+        setRoomUsers(["Joy", "Meher"]);
+        setPins(docSnap.exists() ? { ...DEFAULT_PINS, ...docSnap.data() } : DEFAULT_PINS);
+      } else if (docSnap.exists()) {
+        const data = docSnap.data();
+        const names = Object.keys(data);
+        if (names.length >= 2) setRoomUsers([names[0], names[1]]);
+        setPins(data);
+      } else {
+        setPins({});
+      }
     });
-    const unsubTheme = onSnapshot(doc(db, "settings", "theme"), (docSnap) => {
+
+    const unsubTheme = onSnapshot(roomDoc("settings", "theme"), (docSnap) => {
       if (docSnap.exists() && docSnap.data().key) setThemeKey(docSnap.data().key);
+      else setThemeKey("rose");
     });
+
     return () => {
       unsubPins();
       unsubTheme();
     };
-  }, []);
+  }, [activeRoom]);
 
   useEffect(() => {
-    if (!currentUser) {
+    if (!currentUser || !activeRoom) {
       initialLoadDoneRef.current = false;
       lastMsgIdRef.current = null;
       return;
@@ -149,7 +204,7 @@ export default function CoupleChat() {
 
     const updatePresence = (online) => {
       setDoc(
-        doc(db, "status", "presence"),
+        roomDoc("status", "presence"),
         { [currentUser]: { online, lastSeen: Date.now() } },
         { merge: true }
       );
@@ -157,7 +212,7 @@ export default function CoupleChat() {
 
     const markRead = () => {
       if (document.visibilityState === "visible" && !disguised) {
-        setDoc(doc(db, "status", "read"), { [currentUser]: Date.now() }, { merge: true });
+        setDoc(roomDoc("status", "read"), { [currentUser]: Date.now() }, { merge: true });
       }
     };
 
@@ -178,7 +233,7 @@ export default function CoupleChat() {
     document.addEventListener("visibilitychange", handleVisibility);
     window.addEventListener("beforeunload", handleUnload);
 
-    const q = query(collection(db, "messages"), orderBy("createdAt", "asc"));
+    const q = query(messagesCol(), orderBy("createdAt", "asc"));
     const unsubMessages = onSnapshot(q, (snapshot) => {
       const list = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
       const latest = list[list.length - 1];
@@ -198,14 +253,23 @@ export default function CoupleChat() {
       setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
     });
 
-    const unsubPresence = onSnapshot(doc(db, "status", "presence"), (s) => {
-      if (s.exists()) setPresenceMap(s.data());
+    const unsubPresence = onSnapshot(roomDoc("status", "presence"), (s) => {
+      setPresenceMap(s.exists() ? s.data() : {});
     });
-    const unsubTyping = onSnapshot(doc(db, "status", "typing"), (s) => {
-      if (s.exists()) setTypingStatus(s.data());
+    const unsubTyping = onSnapshot(roomDoc("status", "typing"), (s) => {
+      setTypingStatus(s.exists() ? s.data() : {});
     });
-    const unsubRead = onSnapshot(doc(db, "status", "read"), (s) => {
-      if (s.exists()) setReadMap(s.data());
+    const unsubRead = onSnapshot(roomDoc("status", "read"), (s) => {
+      setReadMap(s.exists() ? s.data() : {});
+    });
+    const unsubGame = onSnapshot(roomDoc("fun", "tictactoe"), (s) => {
+      if (s.exists()) {
+        const g = s.data();
+        const myTurn = g.board?.some(Boolean) && !g.winner && g.turn === currentUser;
+        setPlayAlert(Boolean(myTurn));
+      } else {
+        setPlayAlert(false);
+      }
     });
 
     return () => {
@@ -217,8 +281,9 @@ export default function CoupleChat() {
       unsubPresence();
       unsubTyping();
       unsubRead();
+      unsubGame();
     };
-  }, [currentUser, disguised]);
+  }, [currentUser, disguised, activeRoom]);
 
   const toggleMute = () => {
     const next = !muted;
@@ -230,33 +295,68 @@ export default function CoupleChat() {
 
   const changeTheme = async (key) => {
     setThemeKey(key);
-    await setDoc(doc(db, "settings", "theme"), { key }, { merge: true });
+    await setDoc(roomDoc("settings", "theme"), { key }, { merge: true });
   };
 
   const handleUnlock = (e) => {
     e.preventDefault();
+    if (!activeRoom) {
+      setPinError("আগে Room Code দাও");
+      return;
+    }
     const entered = pinInput.trim();
-    if (entered === pins[USER_1]) {
-      setCurrentUser(USER_1);
-      setPinError("");
-      setPinInput("");
-    } else if (entered === pins[USER_2]) {
-      setCurrentUser(USER_2);
+    const matched = Object.entries(pins).find(([, p]) => p === entered);
+    if (matched) {
+      setCurrentUser(matched[0]);
+      localStorage.setItem("couple_room", activeRoom);
       setPinError("");
       setPinInput("");
     } else {
-      setPinError("ভুল PIN, আবার চেষ্টা করো");
+      setPinError("ভুল Room Code বা PIN");
     }
+  };
+
+  const handleCreateRoom = async (e) => {
+    e.preventDefault();
+    const rid = newRoomId.trim().toLowerCase().replace(/\s+/g, "-");
+    const u1 = newU1.trim();
+    const u2 = newU2.trim();
+    const p1 = newP1.trim();
+    const p2 = newP2.trim();
+
+    if (!rid || rid === DEFAULT_ROOM) return setCreateMsg("অন্য একটি Room Code দাও");
+    if (!u1 || !u2 || u1 === u2) return setCreateMsg("দুজনের আলাদা নাম দাও");
+    if (p1.length < 4 || p2.length < 4 || p1 === p2) {
+      return setCreateMsg("কমপক্ষে ৪ সংখ্যার আলাদা PIN দাও");
+    }
+
+    const existing = await getDoc(doc(db, "rooms", rid, "settings", "pins"));
+    if (existing.exists()) return setCreateMsg("এই Room Code আগেই নেওয়া হয়েছে");
+
+    await setDoc(doc(db, "rooms", rid, "settings", "pins"), {
+      [u1]: p1,
+      [u2]: p2,
+    });
+
+    setRoomInput(rid);
+    localStorage.setItem("couple_room", rid);
+    setShowCreateRoom(false);
+    setCreateMsg("");
+    setNewRoomId("");
+    setNewU1("");
+    setNewP1("");
+    setNewU2("");
+    setNewP2("");
   };
 
   const handleChangePin = async (e) => {
     e.preventDefault();
     const cleaned = newPin.trim();
-    const otherUser = currentUser === USER_1 ? USER_2 : USER_1;
+    const otherUser = currentUser === roomUsers[0] ? roomUsers[1] : roomUsers[0];
     if (cleaned.length < 4) return setPinMsg("কমপক্ষে ৪ সংখ্যার PIN দাও");
     if (cleaned === pins[otherUser]) return setPinMsg("এই PIN অন্যজন ব্যবহার করছে");
 
-    await setDoc(doc(db, "settings", "pins"), { [currentUser]: cleaned }, { merge: true });
+    await setDoc(roomDoc("settings", "pins"), { [currentUser]: cleaned }, { merge: true });
     setNewPin("");
     setPinMsg("PIN পরিবর্তন হয়েছে!");
     setTimeout(() => {
@@ -266,9 +366,9 @@ export default function CoupleChat() {
   };
 
   const setTyping = async (state) => {
-    if (!currentUser || isTypingRef.current === state) return;
+    if (!currentUser || !activeRoom || isTypingRef.current === state) return;
     isTypingRef.current = state;
-    await setDoc(doc(db, "status", "typing"), { [currentUser]: state }, { merge: true });
+    await setDoc(roomDoc("status", "typing"), { [currentUser]: state }, { merge: true });
   };
 
   const handleInputChange = (e) => {
@@ -298,7 +398,7 @@ export default function CoupleChat() {
     if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
     setTyping(false);
 
-    await addDoc(collection(db, "messages"), {
+    await addDoc(messagesCol(), {
       text: msg,
       sender: currentUser,
       reaction: "",
@@ -311,7 +411,7 @@ export default function CoupleChat() {
 
   const sendImageData = async (dataUrl) => {
     if (!currentUser) return;
-    await addDoc(collection(db, "messages"), {
+    await addDoc(messagesCol(), {
       text: "",
       image: dataUrl,
       sender: currentUser,
@@ -350,10 +450,21 @@ export default function CoupleChat() {
     e.target.value = "";
   };
 
-  const toggleRecording = async () => {
-    if (recording && mediaRecorderRef.current) {
+  const stopRecording = () => {
+    if (recTimerRef.current) {
+      clearInterval(recTimerRef.current);
+      recTimerRef.current = null;
+    }
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
       mediaRecorderRef.current.stop();
-      setRecording(false);
+    }
+    setRecording(false);
+    setRecSeconds(0);
+  };
+
+  const toggleRecording = async () => {
+    if (recording) {
+      stopRecording();
       return;
     }
 
@@ -371,7 +482,7 @@ export default function CoupleChat() {
         const blob = new Blob(audioChunksRef.current, { type: recorder.mimeType || "audio/webm" });
         const reader = new FileReader();
         reader.onloadend = async () => {
-          await addDoc(collection(db, "messages"), {
+          await addDoc(messagesCol(), {
             text: "",
             audio: reader.result,
             sender: currentUser,
@@ -385,19 +496,38 @@ export default function CoupleChat() {
       mediaRecorderRef.current = recorder;
       recorder.start();
       setRecording(true);
+      setRecSeconds(0);
+
+      recTimerRef.current = setInterval(() => {
+        setRecSeconds((prev) => {
+          if (prev + 1 >= 45) {
+            stopRecording();
+            return 45;
+          }
+          return prev + 1;
+        });
+      }, 1000);
     } catch {
       alert("মাইক্রোফোন পারমিশন দাও");
     }
   };
 
   const openSecretMessage = async (msg) => {
-    if (msg.sender === currentUser || revealedIds[msg.id]) return;
-    setRevealedIds((prev) => ({ ...prev, [msg.id]: true }));
-    setTimeout(async () => {
-      await updateDoc(doc(db, "messages", msg.id), {
-        text: "Secret message opened",
-        viewOnce: false,
-        opened: true,
+    if (msg.sender === currentUser || revealedTexts[msg.id]) return;
+    const secretText = msg.text;
+    setRevealedTexts((prev) => ({ ...prev, [msg.id]: secretText }));
+
+    await updateDoc(doc(messagesCol(), msg.id), {
+      text: "Secret message opened",
+      viewOnce: false,
+      opened: true,
+    });
+
+    setTimeout(() => {
+      setRevealedTexts((prev) => {
+        const copy = { ...prev };
+        delete copy[msg.id];
+        return copy;
       });
     }, 6000);
   };
@@ -410,7 +540,7 @@ export default function CoupleChat() {
     const nowTime = Date.now();
     if (lastTapRef.current.id === msg.id && nowTime - lastTapRef.current.time < 300) {
       lastTapRef.current = { id: null, time: 0 };
-      await updateDoc(doc(db, "messages", msg.id), {
+      await updateDoc(doc(messagesCol(), msg.id), {
         reaction: msg.reaction ? "" : "❤️",
       });
     } else {
@@ -433,33 +563,111 @@ export default function CoupleChat() {
   if (!currentUser) {
     return (
       <div className="flex min-h-dvh w-full items-center justify-center bg-neutral-950 px-6 text-white">
-        <form
-          onSubmit={handleUnlock}
-          className="w-full max-w-xs space-y-4 rounded-2xl border border-neutral-800 bg-neutral-900 p-6 text-center"
-        >
-          <h1 className="text-xl font-semibold">Private Space</h1>
-          <p className="text-xs text-neutral-400">ঢুকতে তোমার নিজের PIN দাও</p>
-          <input
-            type="password"
-            inputMode="numeric"
-            value={pinInput}
-            onChange={(e) => setPinInput(e.target.value)}
-            placeholder="••••"
-            className="w-full rounded-xl border border-neutral-700 bg-neutral-950 px-4 py-3 text-center text-lg tracking-widest outline-none focus:border-rose-500"
-          />
-          {pinError && <p className="text-xs text-rose-400">{pinError}</p>}
-          <button
-            type="submit"
-            className={`w-full rounded-xl ${theme.btn} py-3 text-sm font-medium text-white active:scale-95`}
+        {!showCreateRoom ? (
+          <form
+            onSubmit={handleUnlock}
+            className="w-full max-w-xs space-y-3.5 rounded-2xl border border-neutral-800 bg-neutral-900 p-6 text-center"
           >
-            Unlock
-          </button>
-        </form>
+            <h1 className="text-xl font-semibold">Private Space</h1>
+            <p className="text-xs text-neutral-400">রুম কোড ও তোমার PIN দাও</p>
+            <input
+              type="text"
+              value={roomInput}
+              onChange={(e) => setRoomInput(e.target.value)}
+              placeholder="Room Code"
+              className="w-full rounded-xl border border-neutral-700 bg-neutral-950 px-4 py-2.5 text-center text-sm outline-none focus:border-rose-500"
+            />
+            <input
+              type="password"
+              inputMode="numeric"
+              value={pinInput}
+              onChange={(e) => setPinInput(e.target.value)}
+              placeholder="PIN ••••"
+              className="w-full rounded-xl border border-neutral-700 bg-neutral-950 px-4 py-3 text-center text-lg tracking-widest outline-none focus:border-rose-500"
+            />
+            {pinError && <p className="text-xs text-rose-400">{pinError}</p>}
+            <button
+              type="submit"
+              className={`w-full rounded-xl ${theme.btn} py-3 text-sm font-medium text-white active:scale-95`}
+            >
+              Unlock
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowCreateRoom(true)}
+              className="w-full pt-1 text-xs text-neutral-400 underline"
+            >
+              + বন্ধুদের জন্য নতুন রুম বানাও
+            </button>
+          </form>
+        ) : (
+          <form
+            onSubmit={handleCreateRoom}
+            className="w-full max-w-xs space-y-3 rounded-2xl border border-neutral-800 bg-neutral-900 p-5 text-center"
+          >
+            <h2 className="text-base font-semibold">নতুন রুম তৈরি করো</h2>
+            <input
+              type="text"
+              value={newRoomId}
+              onChange={(e) => setNewRoomId(e.target.value)}
+              placeholder="Room Code (যেমন: rafi-tina)"
+              className="w-full rounded-xl border border-neutral-700 bg-neutral-950 px-3 py-2 text-xs outline-none"
+            />
+            <div className="grid grid-cols-2 gap-2">
+              <input
+                type="text"
+                value={newU1}
+                onChange={(e) => setNewU1(e.target.value)}
+                placeholder="প্রথম নাম"
+                className="rounded-xl border border-neutral-700 bg-neutral-950 px-3 py-2 text-xs outline-none"
+              />
+              <input
+                type="password"
+                inputMode="numeric"
+                value={newP1}
+                onChange={(e) => setNewP1(e.target.value)}
+                placeholder="PIN (4+)"
+                className="rounded-xl border border-neutral-700 bg-neutral-950 px-3 py-2 text-xs outline-none"
+              />
+              <input
+                type="text"
+                value={newU2}
+                onChange={(e) => setNewU2(e.target.value)}
+                placeholder="দ্বিতীয় নাম"
+                className="rounded-xl border border-neutral-700 bg-neutral-950 px-3 py-2 text-xs outline-none"
+              />
+              <input
+                type="password"
+                inputMode="numeric"
+                value={newP2}
+                onChange={(e) => setNewP2(e.target.value)}
+                placeholder="PIN (4+)"
+                className="rounded-xl border border-neutral-700 bg-neutral-950 px-3 py-2 text-xs outline-none"
+              />
+            </div>
+            {createMsg && <p className="text-xs text-rose-400">{createMsg}</p>}
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setShowCreateRoom(false)}
+                className="flex-1 rounded-xl border border-neutral-700 py-2 text-xs text-neutral-300"
+              >
+                Back
+              </button>
+              <button
+                type="submit"
+                className={`flex-1 rounded-xl ${theme.btn} py-2 text-xs font-medium text-white`}
+              >
+                Create
+              </button>
+            </div>
+          </form>
+        )}
       </div>
     );
   }
 
-  const otherUser = currentUser === USER_1 ? USER_2 : USER_1;
+  const otherUser = currentUser === roomUsers[0] ? roomUsers[1] : roomUsers[0];
   const statusText = typingStatus[otherUser]
     ? "Typing..."
     : formatLastSeen(presenceMap[otherUser], now);
@@ -478,7 +686,6 @@ export default function CoupleChat() {
   return (
     <div className="flex min-h-dvh w-full justify-center bg-neutral-950 text-white">
       <main className="relative flex h-dvh w-full max-w-md flex-col overflow-hidden bg-neutral-950">
-        {/* ক্লিন হেডার */}
         <header className="relative flex items-center justify-between border-b border-neutral-800 px-4 py-3">
           <div>
             <h1 className="text-base font-semibold">{otherUser}</h1>
@@ -497,9 +704,12 @@ export default function CoupleChat() {
           <div className="flex items-center gap-2">
             <button
               onClick={() => setShowFun(true)}
-              className="rounded-lg border border-neutral-800 px-2.5 py-1 text-xs text-neutral-200"
+              className="relative rounded-lg border border-neutral-800 px-2.5 py-1 text-xs text-neutral-200"
             >
               Play
+              {playAlert && (
+                <span className="absolute -right-1 -top-1 h-2.5 w-2.5 animate-pulse rounded-full bg-rose-500" />
+              )}
             </button>
             <button
               onClick={() => {
@@ -567,7 +777,6 @@ export default function CoupleChat() {
           )}
         </header>
 
-        {/* সার্চ বার */}
         {showSearch && (
           <div className="flex items-center gap-2 border-b border-neutral-800 bg-neutral-900 px-4 py-2">
             <input
@@ -590,7 +799,6 @@ export default function CoupleChat() {
           </div>
         )}
 
-        {/* মেসেজ লিস্ট */}
         <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
           {displayedMessages.map((msg) => {
             const isMe = msg.sender === currentUser;
@@ -600,7 +808,8 @@ export default function CoupleChat() {
                   minute: "2-digit",
                 })
               : "";
-            const isSecretHidden = msg.viewOnce && !isMe && !revealedIds[msg.id];
+            const activeSecretText = revealedTexts[msg.id];
+            const isSecretHidden = msg.viewOnce && !isMe && !activeSecretText;
             const showSeen = isMe && lastMyMsg?.id === msg.id && isSeen;
             const ytId = !isSecretHidden && !msg.opened ? getYouTubeId(msg.text) : null;
 
@@ -612,7 +821,7 @@ export default function CoupleChat() {
                 <div
                   onClick={() => handleDoubleTap(msg)}
                   className={`relative max-w-[82%] cursor-pointer select-none rounded-2xl px-3.5 py-2 text-sm ${
-                    msg.opened
+                    msg.opened && !activeSecretText
                       ? "border border-neutral-800 bg-neutral-900 italic text-neutral-500"
                       : isMe
                       ? `rounded-br-sm ${theme.bubble} text-white`
@@ -632,6 +841,8 @@ export default function CoupleChat() {
                     <audio controls src={msg.audio} className="h-9 w-52" />
                   ) : isSecretHidden ? (
                     <span>🔒 Secret message (Tap to view)</span>
+                  ) : activeSecretText ? (
+                    <span>⏳ {activeSecretText}</span>
                   ) : (
                     <span>
                       {msg.viewOnce && isMe ? "🔒 " : ""}
@@ -679,7 +890,6 @@ export default function CoupleChat() {
           <div ref={bottomRef} />
         </div>
 
-        {/* রিপ্লাই প্রিভিউ */}
         {replyTo && (
           <div className="flex items-center justify-between border-t border-neutral-800 bg-neutral-900 px-4 py-2 text-xs">
             <div className="truncate text-neutral-300">
@@ -692,7 +902,6 @@ export default function CoupleChat() {
           </div>
         )}
 
-        {/* ইনপুট ও টুলবার */}
         <div className="space-y-2 border-t border-neutral-800 px-3 py-2.5">
           <div className="flex items-center gap-2">
             <input
@@ -718,7 +927,7 @@ export default function CoupleChat() {
                   : "border-neutral-800 bg-neutral-900 text-neutral-300"
               }`}
             >
-              {recording ? "Stop ●" : "Voice"}
+              {recording ? `Stop ● ${recSeconds}s / 45s` : "Voice"}
             </button>
             <button
               type="button"
@@ -763,6 +972,9 @@ export default function CoupleChat() {
 
         {showFun && (
           <FunModal
+            roomId={activeRoom}
+            user1={roomUsers[0]}
+            user2={roomUsers[1]}
             currentUser={currentUser}
             otherUser={otherUser}
             themeBtn={theme.btn}

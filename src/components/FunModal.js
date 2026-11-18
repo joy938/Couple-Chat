@@ -12,6 +12,8 @@ import {
   serverTimestamp,
 } from "firebase/firestore";
 
+const DEFAULT_ROOM = "joy-meher";
+
 const QUESTIONS = [
   "আজকের দিনের সবচেয়ে সুন্দর মুহূর্ত কোনটা ছিল?",
   "আমার কোন অভ্যাসটা তোমার সবচেয়ে বেশি ভালো লাগে?",
@@ -72,6 +74,9 @@ function extractYouTubeId(url) {
 }
 
 export default function FunModal({
+  roomId = DEFAULT_ROOM,
+  user1 = "Joy",
+  user2 = "Meher",
   currentUser,
   otherUser,
   themeBtn,
@@ -107,17 +112,25 @@ export default function FunModal({
   const dayNum = Math.floor(Date.now() / 86400000);
   const todayQuestion = QUESTIONS[dayNum % QUESTIONS.length];
 
+  const roomDoc = (col, id) =>
+    roomId === DEFAULT_ROOM ? doc(db, col, id) : doc(db, "rooms", roomId, col, id);
+
+  const messagesCol = () =>
+    roomId === DEFAULT_ROOM
+      ? collection(db, "messages")
+      : collection(db, "rooms", roomId, "messages");
+
   useEffect(() => {
-    const unsubQ = onSnapshot(doc(db, "fun", `daily_${todayKey}`), (s) => {
+    const unsubQ = onSnapshot(roomDoc("fun", `daily_${todayKey}`), (s) => {
       if (s.exists()) setAnswers(s.data());
     });
-    const unsubG = onSnapshot(doc(db, "fun", "tictactoe"), (s) => {
+    const unsubG = onSnapshot(roomDoc("fun", "tictactoe"), (s) => {
       if (s.exists()) setGame(s.data());
     });
-    const unsubTD = onSnapshot(doc(db, "fun", "truth_dare"), (s) => {
+    const unsubTD = onSnapshot(roomDoc("fun", "truth_dare"), (s) => {
       if (s.exists()) setCurrentCard(s.data());
     });
-    const unsubCustom = onSnapshot(doc(db, "fun", "custom_prompts"), (s) => {
+    const unsubCustom = onSnapshot(roomDoc("fun", "custom_prompts"), (s) => {
       if (s.exists()) {
         setCustomPrompts({
           Truth: s.data().Truth || [],
@@ -126,10 +139,10 @@ export default function FunModal({
         });
       }
     });
-    const unsubWatch = onSnapshot(doc(db, "fun", "watch_together"), (s) => {
+    const unsubWatch = onSnapshot(roomDoc("fun", "watch_together"), (s) => {
       if (s.exists()) setWatchState(s.data());
     });
-    const unsubTouch = onSnapshot(doc(db, "fun", "live_touch"), (s) => {
+    const unsubTouch = onSnapshot(roomDoc("fun", "live_touch"), (s) => {
       if (s.exists()) setTouchMap(s.data());
     });
 
@@ -141,7 +154,7 @@ export default function FunModal({
       unsubWatch();
       unsubTouch();
     };
-  }, [todayKey]);
+  }, [todayKey, roomId]);
 
   useEffect(() => {
     const otherTouch = touchMap[otherUser];
@@ -169,7 +182,7 @@ export default function FunModal({
     const x = Math.max(5, Math.min(95, ((clientX - rect.left) / rect.width) * 100));
     const y = Math.max(5, Math.min(95, ((clientY - rect.top) / rect.height) * 100));
     setDoc(
-      doc(db, "fun", "live_touch"),
+      roomDoc("fun", "live_touch"),
       { [currentUser]: { active, x, y, updatedAt: Date.now() } },
       { merge: true }
     );
@@ -198,7 +211,7 @@ export default function FunModal({
     e.preventDefault();
     if (!myAnswer.trim()) return;
     await setDoc(
-      doc(db, "fun", `daily_${todayKey}`),
+      roomDoc("fun", `daily_${todayKey}`),
       { [currentUser]: myAnswer.trim() },
       { merge: true }
     );
@@ -210,18 +223,18 @@ export default function FunModal({
     if (game.board[idx] || game.winner || (!isFirstMove && game.turn !== currentUser)) return;
 
     const nextBoard = [...game.board];
-    nextBoard[idx] = currentUser === "Joy" ? "X" : "O";
+    nextBoard[idx] = currentUser === user1 ? "X" : "O";
     const winner = checkWinner(nextBoard);
-    const nextTurn = currentUser === "Joy" ? "Meher" : "Joy";
+    const nextTurn = currentUser === user1 ? user2 : user1;
 
-    await setDoc(doc(db, "fun", "tictactoe"), {
+    await setDoc(roomDoc("fun", "tictactoe"), {
       board: nextBoard,
       turn: nextTurn,
       winner,
     });
 
     if (isFirstMove) {
-      await addDoc(collection(db, "messages"), {
+      await addDoc(messagesCol(), {
         text: `🎮 ${currentUser} Tic-Tac-Toe শুরু করেছে! Play > Game-এ গিয়ে তোমার চাল দাও।`,
         sender: currentUser,
         reaction: "",
@@ -231,7 +244,7 @@ export default function FunModal({
   };
 
   const resetGame = async () => {
-    await setDoc(doc(db, "fun", "tictactoe"), {
+    await setDoc(roomDoc("fun", "tictactoe"), {
       board: Array(9).fill(""),
       turn: "",
       winner: "",
@@ -241,7 +254,7 @@ export default function FunModal({
   const drawRandomCard = async (type) => {
     const pool = [...DEFAULT_PROMPTS[type], ...(customPrompts[type] || [])];
     const picked = pool[Math.floor(Math.random() * pool.length)];
-    await setDoc(doc(db, "fun", "truth_dare"), {
+    await setDoc(roomDoc("fun", "truth_dare"), {
       type,
       text: picked,
       by: currentUser,
@@ -254,7 +267,7 @@ export default function FunModal({
     const text = customText.trim();
     setCustomText("");
     await setDoc(
-      doc(db, "fun", "custom_prompts"),
+      roomDoc("fun", "custom_prompts"),
       { [customType]: arrayUnion(text) },
       { merge: true }
     );
@@ -265,7 +278,7 @@ export default function FunModal({
     const id = extractYouTubeId(watchUrl.trim());
     if (!id) return;
     setWatchUrl("");
-    await setDoc(doc(db, "fun", "watch_together"), {
+    await setDoc(roomDoc("fun", "watch_together"), {
       videoId: id,
       isPlaying: false,
       by: currentUser,
@@ -275,7 +288,7 @@ export default function FunModal({
   const togglePlayTogether = async () => {
     if (!watchState.videoId) return;
     await setDoc(
-      doc(db, "fun", "watch_together"),
+      roomDoc("fun", "watch_together"),
       { isPlaying: !watchState.isPlaying, by: currentUser },
       { merge: true }
     );
@@ -367,11 +380,11 @@ export default function FunModal({
               {game.winner === "Draw"
                 ? "খেলা ড্র হয়েছে!"
                 : game.winner
-                ? `${game.winner === "X" ? "Joy" : "Meher"} জিতেছে!`
+                ? `${game.winner === "X" ? user1 : user2} জিতেছে!`
                 : game.board.every((c) => !c)
                 ? "যেকোনো একজন প্রথম চাল দিয়ে শুরু করো!"
                 : game.turn === currentUser
-                ? `তোমার চাল (${currentUser === "Joy" ? "X" : "O"})`
+                ? `তোমার চাল (${currentUser === user1 ? "X" : "O"})`
                 : `${otherUser}-এর চালের জন্য অপেক্ষা...`}
             </p>
             <div className="mx-auto grid w-52 grid-cols-3 gap-2">

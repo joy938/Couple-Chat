@@ -15,16 +15,11 @@ export default function CalculatorDisguise({ pins, onUnlock }) {
       return;
     }
     if (val === "=") {
-      // PIN মিলে গেলে চ্যাটে ফিরে যাবে
-      if (display === pins.Joy) {
-        onUnlock("Joy");
+      const matched = Object.entries(pins).find(([, p]) => p === display);
+      if (matched) {
+        onUnlock(matched[0]);
         return;
       }
-      if (display === pins.Meher) {
-        onUnlock("Meher");
-        return;
-      }
-      // সাধারণ অঙ্ক করলে আসল উত্তর দেখাবে
       try {
         const sanitized = display.replace(/×/g, "*").replace(/÷/g, "/");
         if (/^[0-9+\-*/.]+$/.test(sanitized)) {
