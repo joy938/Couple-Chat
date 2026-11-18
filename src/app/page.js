@@ -38,6 +38,32 @@ function formatLastSeen(presence, now) {
   return `Last seen ${days}d ago`;
 }
 
+// কোনো অডিও ফাইল ছাড়াই মিষ্টি নোটিফিকেশন সাউন্ড তৈরি করা
+function playNotificationSound() {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(587.33, ctx.currentTime); // D5
+    osc.frequency.setValueAtTime(880, ctx.currentTime + 0.08); // A5
+
+    gain.gain.setValueAtTime(0.12, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.25);
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+
+    osc.start();
+    osc.stop(ctx.currentTime + 0.25);
+  } catch {
+    // ব্রাউজার অডিও ব্লক করলে এরর এড়িয়ে যাবে
+  }
+}
+
 export default function CoupleChat() {
   const [pins, setPins] = useState(DEFAULT_PINS);
   const [currentUser, setCurrentUser] = useState("");
@@ -48,6 +74,7 @@ export default function CoupleChat() {
   const [newPin, setNewPin] = useState("");
   const [pinMsg, setPinMsg] = useState("");
 
+  const [muted, setMuted] = useState(false);
   const [messages, setMessages] = useState([]);
   const [text, setText] = useState("");
   const [presenceMap, setPresenceMap] = useState({});
@@ -58,14 +85,21 @@ export default function CoupleChat() {
   const typingTimeoutRef = useRef(null);
   const isTypingRef = useRef(false);
   const lastTapRef = useRef({ id: null, time: 0 });
+  const initialLoadDoneRef = useRef(false);
+  const lastMsgIdRef = useRef(null);
+  const mutedRef = useRef(false);
 
-  // প্রতি ১৫ সেকেন্ডে সময় আপডেট করা যেন Last seen ঠিক থাকে
+  useEffect(() => {
+    const savedMute = localStorage.getItem("couple_muted") === "true";
+    setMuted(savedMute);
+    mutedRef.current = savedMute;
+  }, []);
+
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 15000);
     return () => clearInterval(timer);
   }, []);
 
-  // Firestore থেকে সেভ করা PIN লোড করা
   useEffect(() => {
     const unsubPins = onSnapshot(doc(db, "settings", "pins"), (docSnap) => {
       if (docSnap.exists()) {
@@ -75,9 +109,12 @@ export default function CoupleChat() {
     return () => unsubPins();
   }, []);
 
-  // লগইন হলে মেসেজ, টাইপিং ও Online/Last seen আপডেট রাখা
   useEffect(() => {
-    if (!currentUser) return;
+    if (!currentUser) {
+      initialLoadDoneRef.current = false;
+      lastMsgIdRef.current = null;
+      return;
+    }
 
     const updatePresence = (online) => {
       setDoc(
@@ -105,6 +142,18 @@ export default function CoupleChat() {
     const q = query(collection(db, "messages"), orderBy("createdAt", "asc"));
     const unsubMessages = onSnapshot(q, (snapshot) => {
       const list = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
+      const latest = list[list.length - 1];
+
+      if (!initialLoadDoneRef.current) {
+        initialLoadDoneRef.current = true;
+        if (latest) lastMsgIdRef.current = latest.id;
+      } else if (latest && latest.id !== lastMsgIdRef.current) {
+        lastMsgIdRef.current = latest.id;
+        if (latest.sender !== currentUser && !mutedRef.current) {
+          playNotificationSound();
+        }
+      }
+
       setMessages(list);
       setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
     });
@@ -127,6 +176,14 @@ export default function CoupleChat() {
       unsubTyping();
     };
   }, [currentUser]);
+
+  const toggleMute = () => {
+    const next = !muted;
+    setMuted(next);
+    mutedRef.current = next;
+    localStorage.setItem("couple_muted", String(next));
+    if (!next) playNotificationSound();
+  };
 
   const handleUnlock = (e) => {
     e.preventDefault();
@@ -226,7 +283,7 @@ export default function CoupleChat() {
 
   if (!currentUser) {
     return (
-      <main className="flex min-h-dvh items-center justify-center bg-neutral-950 px-6 text-white">
+      <div className="min-h-dvh w-full bg-neutral-950 text-white flex items-center justify-center px-6">
         <form
           onSubmit={handleUnlock}
           className="w-full max-w-xs space-y-4 rounded-2xl border border-neutral-800 bg-neutral-900 p-6 text-center"
@@ -249,146 +306,154 @@ export default function CoupleChat() {
             Unlock
           </button>
         </form>
-      </main>
+      </div>
     );
   }
 
   return (
-    <main className="relative mx-auto flex h-dvh max-w-md flex-col bg-neutral-950 text-white">
-      <header className="flex items-center justify-between border-b border-neutral-800 px-4 py-3">
-        <div>
-          <h1 className="text-base font-semibold">{otherUser}</h1>
-          <p
-            className={`text-xs ${
-              typingStatus[otherUser]
-                ? "text-rose-400"
-                : isOtherOnline
-                ? "text-emerald-400"
-                : "text-neutral-400"
-            }`}
-          >
-            {statusText}
-          </p>
-        </div>
-        <div className="flex gap-2">
-          <button
-            onClick={() => {
-              setShowPinModal(true);
-              setPinMsg("");
-              setNewPin("");
-            }}
-            className="rounded-lg border border-neutral-800 px-2.5 py-1 text-xs text-neutral-400"
-          >
-            PIN
-          </button>
-          <button
-            onClick={() => {
-              setTyping(false);
-              setCurrentUser("");
-            }}
-            className="rounded-lg border border-neutral-800 px-2.5 py-1 text-xs text-neutral-400"
-          >
-            Lock
-          </button>
-        </div>
-      </header>
-
-      <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
-        {messages.map((msg) => {
-          const isMe = msg.sender === currentUser;
-          const time = msg.createdAt?.toDate
-            ? msg.createdAt.toDate().toLocaleTimeString([], {
-                hour: "2-digit",
-                minute: "2-digit",
-              })
-            : "";
-
-          return (
-            <div
-              key={msg.id}
-              className={`flex flex-col ${isMe ? "items-end" : "items-start"}`}
+    <div className="min-h-dvh w-full bg-neutral-950 text-white flex justify-center">
+      <main className="relative flex h-dvh w-full max-w-md flex-col overflow-hidden bg-neutral-950">
+        <header className="flex items-center justify-between border-b border-neutral-800 px-4 py-3">
+          <div>
+            <h1 className="text-base font-semibold">{otherUser}</h1>
+            <p
+              className={`text-xs ${
+                typingStatus[otherUser]
+                  ? "text-rose-400"
+                  : isOtherOnline
+                  ? "text-emerald-400"
+                  : "text-neutral-400"
+              }`}
             >
+              {statusText}
+            </p>
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={toggleMute}
+              className="rounded-lg border border-neutral-800 px-2.5 py-1 text-xs text-neutral-300"
+            >
+              {muted ? "Muted" : "Sound"}
+            </button>
+            <button
+              onClick={() => {
+                setShowPinModal(true);
+                setPinMsg("");
+                setNewPin("");
+              }}
+              className="rounded-lg border border-neutral-800 px-2.5 py-1 text-xs text-neutral-400"
+            >
+              PIN
+            </button>
+            <button
+              onClick={() => {
+                setTyping(false);
+                setCurrentUser("");
+              }}
+              className="rounded-lg border border-neutral-800 px-2.5 py-1 text-xs text-neutral-400"
+            >
+              Lock
+            </button>
+          </div>
+        </header>
+
+        <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
+          {messages.map((msg) => {
+            const isMe = msg.sender === currentUser;
+            const time = msg.createdAt?.toDate
+              ? msg.createdAt.toDate().toLocaleTimeString([], {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                })
+              : "";
+
+            return (
               <div
-                onClick={() => handleDoubleTap(msg)}
-                className={`relative max-w-[78%] cursor-pointer select-none rounded-2xl px-3.5 py-2 text-sm ${
-                  isMe
-                    ? "rounded-br-sm bg-rose-600 text-white"
-                    : "rounded-bl-sm bg-neutral-800 text-neutral-100"
-                }`}
+                key={msg.id}
+                className={`flex flex-col ${isMe ? "items-end" : "items-start"}`}
               >
-                {msg.text}
-                {msg.reaction && (
-                  <span
-                    className={`absolute -bottom-2.5 ${
-                      isMe ? "left-1" : "right-1"
-                    } rounded-full bg-neutral-900 px-1.5 py-0.5 text-xs shadow`}
-                  >
-                    {msg.reaction}
-                  </span>
+                <div
+                  onClick={() => handleDoubleTap(msg)}
+                  className={`relative max-w-[80%] cursor-pointer select-none rounded-2xl px-3.5 py-2 text-sm ${
+                    isMe
+                      ? "rounded-br-sm bg-rose-600 text-white"
+                      : "rounded-bl-sm bg-neutral-800 text-neutral-100"
+                  }`}
+                >
+                  {msg.text}
+                  {msg.reaction && (
+                    <span
+                      className={`absolute -bottom-2.5 ${
+                        isMe ? "left-1" : "right-1"
+                      } rounded-full bg-neutral-900 px-1.5 py-0.5 text-xs shadow`}
+                    >
+                      {msg.reaction}
+                    </span>
+                  )}
+                </div>
+                {time && (
+                  <span className="mt-1 text-[10px] text-neutral-500">{time}</span>
                 )}
               </div>
-              {time && (
-                <span className="mt-1 text-[10px] text-neutral-500">{time}</span>
-              )}
-            </div>
-          );
-        })}
-        <div ref={bottomRef} />
-      </div>
-
-      <form
-        onSubmit={sendMessage}
-        className="flex items-center gap-2 border-t border-neutral-800 px-3 py-3"
-      >
-        <input
-          type="text"
-          value={text}
-          onChange={handleInputChange}
-          placeholder="Write something..."
-          className="flex-1 rounded-full border border-neutral-800 bg-neutral-900 px-4 py-2.5 text-sm outline-none focus:border-rose-500"
-        />
-        <button
-          type="submit"
-          className="rounded-full bg-rose-600 px-4 py-2.5 text-sm font-medium text-white active:scale-95"
-        >
-          Send
-        </button>
-      </form>
-
-      {showPinModal && (
-        <div className="absolute inset-0 flex items-center justify-center bg-black/70 px-6">
-          <form
-            onSubmit={handleChangePin}
-            className="w-full max-w-xs space-y-4 rounded-2xl border border-neutral-800 bg-neutral-900 p-5 text-center"
-          >
-            <h2 className="text-base font-semibold">{currentUser}-এর PIN বদলাও</h2>
-            <input
-              type="password"
-              inputMode="numeric"
-              value={newPin}
-              onChange={(e) => setNewPin(e.target.value)}
-              placeholder="নতুন PIN (কমপক্ষে ৪ সংখ্যা)"
-              className="w-full rounded-xl border border-neutral-700 bg-neutral-950 px-4 py-2.5 text-center text-sm tracking-widest outline-none focus:border-rose-500"
-            />
-            {pinMsg && <p className="text-xs text-rose-400">{pinMsg}</p>}
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={() => setShowPinModal(false)}
-                className="flex-1 rounded-xl border border-neutral-700 py-2 text-xs text-neutral-300"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                className="flex-1 rounded-xl bg-rose-600 py-2 text-xs font-medium text-white"
-              >
-                Save
-              </button>
-            </div>
-          </form>
+            );
+          })}
+          <div ref={bottomRef} />
         </div>
-      )}
-    </main>
+
+        <form
+          onSubmit={sendMessage}
+          className="flex items-center gap-2 border-t border-neutral-800 px-3 py-3"
+        >
+          <input
+            type="text"
+            value={text}
+            onChange={handleInputChange}
+            placeholder="Write something..."
+            className="flex-1 rounded-full border border-neutral-800 bg-neutral-900 px-4 py-2.5 text-sm outline-none focus:border-rose-500"
+          />
+          <button
+            type="submit"
+            className="rounded-full bg-rose-600 px-4 py-2.5 text-sm font-medium text-white active:scale-95"
+          >
+            Send
+          </button>
+        </form>
+
+        {showPinModal && (
+          <div className="absolute inset-0 flex items-center justify-center bg-black/70 px-6">
+            <form
+              onSubmit={handleChangePin}
+              className="w-full max-w-xs space-y-4 rounded-2xl border border-neutral-800 bg-neutral-900 p-5 text-center"
+            >
+              <h2 className="text-base font-semibold">{currentUser}-এর PIN বদলাও</h2>
+              <input
+                type="password"
+                inputMode="numeric"
+                value={newPin}
+                onChange={(e) => setNewPin(e.target.value)}
+                placeholder="নতুন PIN (কমপক্ষে ৪ সংখ্যা)"
+                className="w-full rounded-xl border border-neutral-700 bg-neutral-950 px-4 py-2.5 text-center text-sm tracking-widest outline-none focus:border-rose-500"
+              />
+              {pinMsg && <p className="text-xs text-rose-400">{pinMsg}</p>}
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowPinModal(false)}
+                  className="flex-1 rounded-xl border border-neutral-700 py-2 text-xs text-neutral-300"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="flex-1 rounded-xl bg-rose-600 py-2 text-xs font-medium text-white"
+                >
+                  Save
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
+      </main>
+    </div>
   );
 }
