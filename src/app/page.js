@@ -7,6 +7,7 @@ import {
   addDoc,
   query,
   orderBy,
+  limitToLast,
   onSnapshot,
   serverTimestamp,
   doc,
@@ -34,9 +35,9 @@ const THEMES = {
 
 function formatLastSeen(presence, now) {
   if (!presence) return "Offline";
-  if (presence.online && now - presence.lastSeen < 45000) return "Online";
+  if (presence.online) return "Online";
   if (!presence.lastSeen) return "Offline";
-  const diffSec = Math.floor((now - presence.lastSeen) / 1000);
+  const diffSec = Math.max(0, Math.floor((now - presence.lastSeen) / 1000));
   if (diffSec < 60) return "Last seen just now";
   const mins = Math.floor(diffSec / 60);
   if (mins < 60) return `Last seen ${mins}m ago`;
@@ -103,6 +104,10 @@ export default function CoupleChat() {
   const [searchQuery, setSearchQuery] = useState("");
   const [playAlert, setPlayAlert] = useState(false);
 
+  const [nudgeSent, setNudgeSent] = useState(false);
+  const [nudgeAlert, setNudgeAlert] = useState("");
+  const [shakeX, setShakeX] = useState(0);
+
   const [recording, setRecording] = useState(false);
   const [recSeconds, setRecSeconds] = useState(0);
   const [themeKey, setThemeKey] = useState("rose");
@@ -113,6 +118,7 @@ export default function CoupleChat() {
 
   const [muted, setMuted] = useState(false);
   const [messages, setMessages] = useState([]);
+  const [msgLimit, setMsgLimit] = useState(30);
   const [text, setText] = useState("");
   const [presenceMap, setPresenceMap] = useState({});
   const [typingStatus, setTypingStatus] = useState({});
@@ -124,12 +130,15 @@ export default function CoupleChat() {
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
   const recTimerRef = useRef(null);
+  const nudgeInitRef = useRef(false);
+  const lastNudgeAtRef = useRef(0);
   const typingTimeoutRef = useRef(null);
   const isTypingRef = useRef(false);
   const lastTapRef = useRef({ id: null, time: 0 });
   const swipeStartRef = useRef({ id: null, x: 0, y: 0 });
   const initialLoadDoneRef = useRef(false);
   const lastMsgIdRef = useRef(null);
+  const lastOtherMsgIdRef = useRef(null);
   const mutedRef = useRef(false);
 
   const theme = THEMES[themeKey] || THEMES.rose;
@@ -204,7 +213,9 @@ export default function CoupleChat() {
   useEffect(() => {
     if (!currentUser || !activeRoom) {
       initialLoadDoneRef.current = false;
+      nudgeInitRef.current = false;
       lastMsgIdRef.current = null;
+      lastOtherMsgIdRef.current = null;
       return;
     }
 
@@ -216,14 +227,13 @@ export default function CoupleChat() {
       );
     };
 
-    const markRead = () => {
-      if (document.visibilityState === "visible" && !disguised) {
-        setDoc(roomDoc("status", "read"), { [currentUser]: Date.now() }, { merge: true });
+    const markRead = (msgId) => {
+      if (msgId && document.visibilityState === "visible" && !disguised) {
+        setDoc(roomDoc("status", "read"), { [currentUser]: msgId }, { merge: true });
       }
     };
 
     updatePresence(true);
-    markRead();
 
     const heartbeat = setInterval(() => {
       if (document.visibilityState === "visible") updatePresence(true);
@@ -232,31 +242,43 @@ export default function CoupleChat() {
     const handleVisibility = () => {
       const visible = document.visibilityState === "visible";
       updatePresence(visible);
-      if (visible) markRead();
+      if (visible && lastOtherMsgIdRef.current) {
+        markRead(lastOtherMsgIdRef.current);
+      }
     };
     const handleUnload = () => updatePresence(false);
 
     document.addEventListener("visibilitychange", handleVisibility);
     window.addEventListener("beforeunload", handleUnload);
 
-    const q = query(messagesCol(), orderBy("createdAt", "asc"));
+    const q = query(messagesCol(), orderBy("createdAt", "asc"), limitToLast(msgLimit));
     const unsubMessages = onSnapshot(q, (snapshot) => {
       const list = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
       const latest = list[list.length - 1];
+      const latestFromOther = [...list].reverse().find((m) => m.sender !== currentUser);
+      if (latestFromOther) {
+        lastOtherMsgIdRef.current = latestFromOther.id;
+      }
 
+      let shouldScroll = false;
       if (!initialLoadDoneRef.current) {
         initialLoadDoneRef.current = true;
         if (latest) lastMsgIdRef.current = latest.id;
+        if (latestFromOther) markRead(latestFromOther.id);
+        shouldScroll = true;
       } else if (latest && latest.id !== lastMsgIdRef.current) {
         lastMsgIdRef.current = latest.id;
-        if (latest.sender !== currentUser && !mutedRef.current) {
-          playNotificationSound();
+        if (latest.sender !== currentUser) {
+          if (!mutedRef.current) playNotificationSound();
+          markRead(latest.id);
         }
-        markRead();
+        shouldScroll = true;
       }
 
       setMessages(list);
-      setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
+      if (shouldScroll) {
+        setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
+      }
     });
 
     const unsubPresence = onSnapshot(roomDoc("status", "presence"), (s) => {
@@ -278,6 +300,39 @@ export default function CoupleChat() {
       }
     });
 
+    const unsubNudge = onSnapshot(roomDoc("status", "nudge"), (s) => {
+      if (!s.exists()) {
+        nudgeInitRef.current = true;
+        return;
+      }
+      const data = s.data();
+      if (!nudgeInitRef.current) {
+        nudgeInitRef.current = true;
+        lastNudgeAtRef.current = data.at || 0;
+        return;
+      }
+      if (data.to === currentUser && data.at && data.at !== lastNudgeAtRef.current) {
+        lastNudgeAtRef.current = data.at;
+        setNudgeAlert(`👋 ${data.from} তোমার মনোযোগ চাইছে!`);
+        if (typeof navigator !== "undefined" && navigator.vibrate) {
+          navigator.vibrate([150, 80, 150, 80, 200]);
+        }
+        if (!mutedRef.current) playNotificationSound();
+
+        let step = 0;
+        const shaker = setInterval(() => {
+          step++;
+          setShakeX(step % 2 === 0 ? 8 : -8);
+          if (step >= 12) {
+            clearInterval(shaker);
+            setShakeX(0);
+          }
+        }, 60);
+
+        setTimeout(() => setNudgeAlert(""), 3000);
+      }
+    });
+
     return () => {
       clearInterval(heartbeat);
       document.removeEventListener("visibilitychange", handleVisibility);
@@ -288,8 +343,23 @@ export default function CoupleChat() {
       unsubTyping();
       unsubRead();
       unsubGame();
+      unsubNudge();
     };
-  }, [currentUser, disguised, activeRoom]);
+  }, [currentUser, disguised, activeRoom, msgLimit]);
+
+  const sendNudge = async () => {
+    const other = currentUser === roomUsers[0] ? roomUsers[1] : roomUsers[0];
+    setNudgeSent(true);
+    if (typeof navigator !== "undefined" && navigator.vibrate) {
+      navigator.vibrate(40);
+    }
+    await setDoc(roomDoc("status", "nudge"), {
+      from: currentUser,
+      to: other,
+      at: Date.now(),
+    });
+    setTimeout(() => setNudgeSent(false), 1500);
+  };
 
   const toggleMute = () => {
     const next = !muted;
@@ -316,6 +386,7 @@ export default function CoupleChat() {
       setCurrentUser(matched[0]);
       localStorage.setItem("couple_room", activeRoom);
       setHasSavedRoom(true);
+      setMsgLimit(30);
       setPinError("");
       setPinInput("");
     } else {
@@ -739,8 +810,7 @@ export default function CoupleChat() {
   const isOtherOnline = statusText === "Online";
 
   const lastMyMsg = [...messages].reverse().find((m) => m.sender === currentUser);
-  const lastMyMsgTime = lastMyMsg?.createdAt?.toMillis ? lastMyMsg.createdAt.toMillis() : 0;
-  const isSeen = lastMyMsg && readMap[otherUser] && readMap[otherUser] >= lastMyMsgTime;
+  const isSeen = Boolean(lastMyMsg && readMap[otherUser] === lastMyMsg.id);
 
   const displayedMessages = searchQuery.trim()
     ? messages.filter((m) =>
@@ -750,7 +820,10 @@ export default function CoupleChat() {
 
   return (
     <div className="flex min-h-dvh w-full justify-center bg-neutral-950 text-white">
-      <main className="relative flex h-dvh w-full max-w-md flex-col overflow-hidden bg-neutral-950">
+      <main
+        style={{ transform: shakeX ? `translateX(${shakeX}px)` : undefined }}
+        className="relative flex h-dvh w-full max-w-md flex-col overflow-hidden bg-neutral-950 transition-transform duration-75"
+      >
         <header className="relative flex items-center justify-between border-b border-neutral-800 px-4 py-3">
           <div>
             <h1 className="text-base font-semibold">{otherUser}</h1>
@@ -842,6 +915,12 @@ export default function CoupleChat() {
           )}
         </header>
 
+        {nudgeAlert && (
+          <div className={`${theme.btn} px-4 py-1.5 text-center text-xs font-medium text-white`}>
+            {nudgeAlert}
+          </div>
+        )}
+
         {showSearch && (
           <div className="flex items-center gap-2 border-b border-neutral-800 bg-neutral-900 px-4 py-2">
             <input
@@ -865,6 +944,17 @@ export default function CoupleChat() {
         )}
 
         <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
+          {!searchQuery.trim() && messages.length >= msgLimit && (
+            <div className="text-center">
+              <button
+                onClick={() => setMsgLimit((prev) => prev + 30)}
+                className="rounded-full border border-neutral-800 bg-neutral-900 px-3 py-1 text-[11px] text-neutral-400 hover:text-white"
+              >
+                Load older
+              </button>
+            </div>
+          )}
+
           {displayedMessages.map((msg) => {
             const isMe = msg.sender === currentUser;
             const time = msg.createdAt?.toDate
@@ -986,7 +1076,7 @@ export default function CoupleChat() {
         )}
 
         <div className="space-y-2 border-t border-neutral-800 px-3 py-2.5">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5 overflow-x-auto">
             <input
               ref={fileInputRef}
               type="file"
@@ -997,14 +1087,14 @@ export default function CoupleChat() {
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              className="rounded-full border border-neutral-800 bg-neutral-900 px-3 py-1 text-xs text-neutral-300"
+              className="shrink-0 rounded-full border border-neutral-800 bg-neutral-900 px-3 py-1 text-xs text-neutral-300"
             >
               Photo
             </button>
             <button
               type="button"
               onClick={toggleRecording}
-              className={`rounded-full border px-3 py-1 text-xs ${
+              className={`shrink-0 rounded-full border px-3 py-1 text-xs ${
                 recording
                   ? "animate-pulse border-rose-500 bg-rose-600 text-white"
                   : "border-neutral-800 bg-neutral-900 text-neutral-300"
@@ -1015,20 +1105,31 @@ export default function CoupleChat() {
             <button
               type="button"
               onClick={() => setShowDoodle(true)}
-              className="rounded-full border border-neutral-800 bg-neutral-900 px-3 py-1 text-xs text-neutral-300"
+              className="shrink-0 rounded-full border border-neutral-800 bg-neutral-900 px-3 py-1 text-xs text-neutral-300"
             >
               Draw
             </button>
             <button
               type="button"
               onClick={() => setSecretMode(!secretMode)}
-              className={`rounded-full border px-3 py-1 text-xs ${
+              className={`shrink-0 rounded-full border px-3 py-1 text-xs ${
                 secretMode
                   ? `${theme.btn} border-transparent text-white`
                   : "border-neutral-800 bg-neutral-900 text-neutral-400"
               }`}
             >
               Secret 🔒
+            </button>
+            <button
+              type="button"
+              onClick={sendNudge}
+              className={`shrink-0 rounded-full border px-3 py-1 text-xs active:scale-95 ${
+                nudgeSent
+                  ? `${theme.btn} border-transparent text-white`
+                  : "border-neutral-800 bg-neutral-900 text-neutral-300"
+              }`}
+            >
+              {nudgeSent ? "Nudged! 👋" : "Nudge 👋"}
             </button>
           </div>
 
