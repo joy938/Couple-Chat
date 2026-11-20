@@ -109,6 +109,7 @@ export default function CoupleChat() {
   const [secretMode, setSecretMode] = useState(false);
   const [replyTo, setReplyTo] = useState(null);
   const [revealedTexts, setRevealedTexts] = useState({});
+  const [swipeOffset, setSwipeOffset] = useState({ id: null, x: 0 });
 
   const [muted, setMuted] = useState(false);
   const [messages, setMessages] = useState([]);
@@ -126,6 +127,7 @@ export default function CoupleChat() {
   const typingTimeoutRef = useRef(null);
   const isTypingRef = useRef(false);
   const lastTapRef = useRef({ id: null, time: 0 });
+  const swipeStartRef = useRef({ id: null, x: 0, y: 0 });
   const initialLoadDoneRef = useRef(false);
   const lastMsgIdRef = useRef(null);
   const mutedRef = useRef(false);
@@ -476,7 +478,7 @@ export default function CoupleChat() {
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
+      const recorder = new MediaRecorder(stream, { audioBitsPerSecond: 24000 });
       audioChunksRef.current = [];
 
       recorder.ondataavailable = (ev) => {
@@ -538,7 +540,19 @@ export default function CoupleChat() {
     }, 6000);
   };
 
+  const deleteMessage = async (msg) => {
+    if (msg.sender !== currentUser || msg.deleted) return;
+    await updateDoc(doc(messagesCol(), msg.id), {
+      text: "🚫 Message deleted",
+      image: "",
+      audio: "",
+      reaction: "",
+      deleted: true,
+    });
+  };
+
   const handleDoubleTap = async (msg) => {
+    if (msg.deleted) return;
     if (msg.viewOnce && msg.sender !== currentUser) {
       openSecretMessage(msg);
       return;
@@ -552,6 +566,33 @@ export default function CoupleChat() {
     } else {
       lastTapRef.current = { id: msg.id, time: nowTime };
     }
+  };
+
+  const handleSwipeStart = (e, msg) => {
+    if (msg.deleted || msg.opened || msg.viewOnce) return;
+    const t = e.touches[0];
+    swipeStartRef.current = { id: msg.id, x: t.clientX, y: t.clientY };
+  };
+
+  const handleSwipeMove = (e, msg) => {
+    if (swipeStartRef.current.id !== msg.id) return;
+    const t = e.touches[0];
+    const dx = t.clientX - swipeStartRef.current.x;
+    const dy = Math.abs(t.clientY - swipeStartRef.current.y);
+    if (dx > 12 && dx > dy) {
+      setSwipeOffset({ id: msg.id, x: Math.min(dx, 65) });
+    }
+  };
+
+  const handleSwipeEnd = (msg) => {
+    if (swipeOffset.id === msg.id && swipeOffset.x >= 45) {
+      setReplyTo(msg);
+      if (typeof navigator !== "undefined" && navigator.vibrate) {
+        navigator.vibrate(25);
+      }
+    }
+    swipeStartRef.current = { id: null, x: 0, y: 0 };
+    setSwipeOffset({ id: null, x: 0 });
   };
 
   if (disguised) {
@@ -740,7 +781,7 @@ export default function CoupleChat() {
                 setTyping(false);
                 setDisguised(true);
               }}
-              className="rounded-lg border border-neutral-800 px-2.5 py-1 text-xs text-amber-400"
+              className="rounded-xl border border-amber-500/40 bg-amber-500/15 px-4 py-2 text-sm font-medium text-amber-400 active:scale-95"
             >
               Hide
             </button>
@@ -835,31 +876,41 @@ export default function CoupleChat() {
             const activeSecretText = revealedTexts[msg.id];
             const isSecretHidden = msg.viewOnce && !isMe && !activeSecretText;
             const showSeen = isMe && lastMyMsg?.id === msg.id && isSeen;
-            const ytId = !isSecretHidden && !msg.opened ? getYouTubeId(msg.text) : null;
+            const ytId = !isSecretHidden && !msg.opened && !msg.deleted ? getYouTubeId(msg.text) : null;
+            const shiftX = swipeOffset.id === msg.id ? swipeOffset.x : 0;
 
             return (
               <div
                 key={msg.id}
+                onTouchStart={(e) => handleSwipeStart(e, msg)}
+                onTouchMove={(e) => handleSwipeMove(e, msg)}
+                onTouchEnd={() => handleSwipeEnd(msg)}
+                style={{
+                  transform: shiftX ? `translateX(${shiftX}px)` : undefined,
+                  transition: shiftX ? "none" : "transform 0.15s ease-out",
+                }}
                 className={`flex flex-col ${isMe ? "items-end" : "items-start"}`}
               >
                 <div
                   onClick={() => handleDoubleTap(msg)}
                   className={`relative max-w-[82%] cursor-pointer select-none rounded-2xl px-3.5 py-2 text-sm ${
-                    msg.opened && !activeSecretText
+                    msg.deleted || (msg.opened && !activeSecretText)
                       ? "border border-neutral-800 bg-neutral-900 italic text-neutral-500"
                       : isMe
                       ? `rounded-br-sm ${theme.bubble} text-white`
                       : "rounded-bl-sm bg-neutral-800 text-neutral-100"
                   }`}
                 >
-                  {msg.replyTo && (
+                  {msg.replyTo && !msg.deleted && (
                     <div className="mb-1.5 rounded-lg bg-black/25 px-2.5 py-1 text-xs text-white/80">
                       <span className="font-semibold">{msg.replyTo.sender}: </span>
                       {msg.replyTo.text}
                     </div>
                   )}
 
-                  {msg.image ? (
+                  {msg.deleted ? (
+                    <span>{msg.text}</span>
+                  ) : msg.image ? (
                     <img src={msg.image} alt="Shared" className="max-h-56 rounded-lg" />
                   ) : msg.audio ? (
                     <audio controls src={msg.audio} className="h-9 w-52" />
@@ -885,7 +936,7 @@ export default function CoupleChat() {
                     </div>
                   )}
 
-                  {msg.reaction && (
+                  {msg.reaction && !msg.deleted && (
                     <span
                       className={`absolute -bottom-2.5 ${
                         isMe ? "left-1" : "right-1"
@@ -898,12 +949,20 @@ export default function CoupleChat() {
 
                 <div className="mt-1 flex items-center gap-2 text-[10px] text-neutral-500">
                   {time && <span>{time}</span>}
-                  {!msg.opened && !msg.viewOnce && (
+                  {!msg.deleted && !msg.opened && !msg.viewOnce && (
                     <button
                       onClick={() => setReplyTo(msg)}
                       className="text-neutral-400 hover:text-white"
                     >
                       Reply
+                    </button>
+                  )}
+                  {isMe && !msg.deleted && (
+                    <button
+                      onClick={() => deleteMessage(msg)}
+                      className="text-neutral-500 hover:text-rose-400"
+                    >
+                      Delete
                     </button>
                   )}
                   {showSeen && <span className={theme.accent}>Seen</span>}
